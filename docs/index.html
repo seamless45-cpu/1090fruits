@@ -10,12 +10,47 @@
   <script type="module" crossorigin src="./assets/app.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/app.css">
 </head>
-<body class="sci-fi-theme">
+<body class="sci-fi-theme pre-game">
   <!-- 3D Canvas Container -->
   <div id="canvas-container"></div>
 
   <!-- Cinematic vignette + edge glow overlay (pure CSS, pointer-transparent) -->
   <div id="vignette" class="vignette-overlay"></div>
+
+  <!-- ================================================================
+       CINEMATIC LOADING SCREEN (PLAY + SETTINGS)
+  ================================================================= -->
+  <div id="loading-screen" class="loading-screen">
+    <div class="loading-bg"></div>
+    <div class="loading-particles"></div>
+    <div class="loading-content">
+      <div class="loading-logo">
+        <div class="loading-logo-main">1090</div>
+        <div class="loading-logo-sub">FRUITS</div>
+        <div class="loading-logo-tag">DEMONS' FROST &amp; FURY // CINEMATIC ARENA</div>
+      </div>
+      <div class="loading-ring"></div>
+      <div class="loading-actions">
+        <button id="btn-loading-play" class="sci-btn btn-loading-play" type="button">▶ PLAY</button>
+        <button id="btn-loading-settings" class="sci-btn btn-loading-settings" type="button">⚙ SETTINGS</button>
+      </div>
+      <div class="loading-hint">WASD MOVE // MOUSE AIM // F G H SKILLS // SHIFT DASH // CLICK EQUIP IN INVENTORY</div>
+    </div>
+    <div class="loading-footer">3D 1090 FRUITS // OPERATIVE PROTOCOL v3.0</div>
+  </div>
+
+  <!-- ================================================================
+       ONE-PIECE STYLE SKILL NAME BANNER
+  ================================================================= -->
+  <div id="skill-banner" class="skill-banner"></div>
+
+  <!-- ================================================================
+       LEVEL-UP BANNER
+  ================================================================= -->
+  <div id="level-up-banner" class="level-up-banner">
+    <div class="level-up-title">LEVEL UP!</div>
+    <div id="level-up-sub" class="level-up-sub">+3 STAT POINTS</div>
+  </div>
 
   <!-- Sci-Fi HUD Overlay (No Scanlines) -->
   <div id="hud" class="hud-overlay">
@@ -28,11 +63,22 @@
             <span class="status-dot pulse-cyan"></span>
             <span class="pilot-id">OPERATIVE // 1090</span>
             <span class="fruit-badge" id="hud-fruit-name">GRAVITY</span>
+            <span class="level-badge" id="hud-level">LVL 1</span>
+            <span class="world-badge" id="hud-world-level">WORLD LVL 1</span>
+            <span class="stat-points-badge" id="hud-stat-points" title="Available stat points (open STATS)">0</span>
           </div>
           <div class="range-readout" id="reticle-range">RANGE: -- M</div>
         </div>
 
         <div class="bars-container">
+          <!-- XP Bar (to next level, max level 100,000,000) -->
+          <div class="bar-row">
+            <span class="bar-label">XP</span>
+            <div class="bar-track xp-track">
+              <div class="bar-fill xp-fill" id="player-xp-bar" style="width: 0%;"></div>
+            </div>
+            <span class="bar-val" id="player-xp-text">0 / 100 XP</span>
+          </div>
           <!-- HP Bar -->
           <div class="bar-row">
             <span class="bar-label">HP</span>
@@ -86,6 +132,11 @@
 
       <!-- Top Right: System Menu & Spawner & Graphics Settings -->
       <div class="top-actions">
+        <button id="btn-stats" class="sci-btn btn-sm sci-btn-accent" title="Allocate Stat Points">
+          <span class="btn-icon">✦</span>
+          <span class="btn-text">STATS</span>
+          <span class="stats-badge" id="stats-badge-hint">3</span>
+        </button>
         <button id="btn-spawner" class="sci-btn btn-sm" title="Combat Arena Spawner">
           <span class="btn-icon">⚡</span>
           <span class="btn-text">SPAWNER</span>
@@ -396,6 +447,99 @@
   </div>
 
   <!-- MODAL: Equipment Selector for Fruits -->
+  <!-- MODAL: Stat Point Allocation -->
+  <div id="modal-stats" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card modal-compact">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">OPERATIVE CORE //</span>
+          <h2 class="modal-title">ALLOCATE STAT POINTS</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-stats">✕</button>
+      </div>
+
+      <div class="modal-body-scroll">
+        <div class="stats-avail-row">
+          <span class="stats-avail-label">AVAILABLE POINTS</span>
+          <span class="stats-avail-value" id="stats-available-points">0</span>
+          <span class="stats-avail-hint">Type any number per row, then APPLY (or hit MAX to dump all)</span>
+        </div>
+
+        <div class="stat-row" data-stat="health">
+          <div class="stat-icon" style="--stat-color:#ff5566">❤️</div>
+          <div class="stat-info">
+            <div class="stat-name">VITALITY</div>
+            <div class="stat-desc">+50 max health per point</div>
+          </div>
+          <div class="stat-points-wrap">
+            <span class="stat-points-label">PTS</span>
+            <span class="stat-points" style="--stat-color:#ff5566">0</span>
+            <span class="stat-bonus" style="--stat-color:#ff5566">+0</span>
+          </div>
+          <div class="stat-controls">
+            <input type="number" min="0" step="1" class="stat-input" placeholder="0" value="0" />
+            <button class="stat-apply-btn" type="button">APPLY</button>
+            <button class="stat-max-btn" type="button">MAX</button>
+          </div>
+        </div>
+
+        <div class="stat-row" data-stat="fruit">
+          <div class="stat-icon" style="--stat-color:#b026ff">🌀</div>
+          <div class="stat-info">
+            <div class="stat-name">FRUIT POWER</div>
+            <div class="stat-desc">+50 fruit skill damage per point</div>
+          </div>
+          <div class="stat-points-wrap">
+            <span class="stat-points-label">PTS</span>
+            <span class="stat-points" style="--stat-color:#b026ff">0</span>
+            <span class="stat-bonus" style="--stat-color:#b026ff">+0</span>
+          </div>
+          <div class="stat-controls">
+            <input type="number" min="0" step="1" class="stat-input" placeholder="0" value="0" />
+            <button class="stat-apply-btn" type="button">APPLY</button>
+            <button class="stat-max-btn" type="button">MAX</button>
+          </div>
+        </div>
+
+        <div class="stat-row" data-stat="gun">
+          <div class="stat-icon" style="--stat-color:#ffaa00">🔫</div>
+          <div class="stat-info">
+            <div class="stat-name">GUN POWER</div>
+            <div class="stat-desc">+50 gun damage per point</div>
+          </div>
+          <div class="stat-points-wrap">
+            <span class="stat-points-label">PTS</span>
+            <span class="stat-points" style="--stat-color:#ffaa00">0</span>
+            <span class="stat-bonus" style="--stat-color:#ffaa00">+0</span>
+          </div>
+          <div class="stat-controls">
+            <input type="number" min="0" step="1" class="stat-input" placeholder="0" value="0" />
+            <button class="stat-apply-btn" type="button">APPLY</button>
+            <button class="stat-max-btn" type="button">MAX</button>
+          </div>
+        </div>
+
+        <div class="stat-row" data-stat="sword">
+          <div class="stat-icon" style="--stat-color:#00f0ff">⚔️</div>
+          <div class="stat-info">
+            <div class="stat-name">BLADE POWER</div>
+            <div class="stat-desc">+50 sword / melee damage per point</div>
+          </div>
+          <div class="stat-points-wrap">
+            <span class="stat-points-label">PTS</span>
+            <span class="stat-points" style="--stat-color:#00f0ff">0</span>
+            <span class="stat-bonus" style="--stat-color:#00f0ff">+0</span>
+          </div>
+          <div class="stat-controls">
+            <input type="number" min="0" step="1" class="stat-input" placeholder="0" value="0" />
+            <button class="stat-apply-btn" type="button">APPLY</button>
+            <button class="stat-max-btn" type="button">MAX</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="modal-fruits" class="sci-modal-backdrop" style="display: none;">
     <div class="sci-modal-card">
       <div class="modal-header">
@@ -517,6 +661,16 @@
           <p>• Bottom horizontal square slots allow equipping/unequipping Fruit, Sword, and Gun independently.</p>
           <p>• Press <strong>[TAB]</strong> or click the Active slot to switch between casting Fruit Skills and Sword Skills.</p>
           <p>• Press <strong>[R]</strong> or click FIRE GUN to manually fire Rimefracture or Wildfire passive guns with auto-aim.</p>
+        </div>
+
+        <div class="help-section">
+          <h4>✦ LEVELS, XP & STAT POINTS</h4>
+          <p>• <strong>Every kill gains XP.</strong> The <span class="help-hl">WORLD LEVEL</span> rises as you rack up kills (every 15 kills), making enemies tougher.</p>
+          <p>• <strong>Higher-level enemies pay more:</strong> each enemy level above 1 adds <span class="help-hl">+50% XP</span> to its reward.</p>
+          <p>• <strong>Level cap: 100,000,000.</strong> Every level grants <span class="help-hl">+3 stat points</span>.</p>
+          <p>• <strong>STATS (top-right ✦ button):</strong> each point is worth <span class="help-hl">+50</span> to its stat — VITALITY (max HP), FRUIT POWER (fruit damage), GUN POWER (gun damage), BLADE POWER (sword/melee damage).</p>
+          <p>• <strong>Bulk allocation:</strong> type <em>any</em> number into a row and hit <strong>APPLY</strong> — or <strong>MAX</strong> to dump all remaining points into one stat. No one-by-one clicking.</p>
+          <p>• Start with <strong>no fruit & no sword equipped</strong> — pick your loadout in the inventory, or fight bare-handed (fists).</p>
         </div>
       </div>
     </div>

@@ -156,6 +156,17 @@ lightning.strikeBolt(new THREE.Vector3(5, 0, 5), 100, '#00f0ff', 0.3, 24);
 lightning.strikeOverlapped(new THREE.Vector3(-10, 0, 10), 4, 3, 90, '#b026ff');
 lightning.strikeCrack(new THREE.Vector3(0, 0, 0), new THREE.Vector3(20, 0, 8), '#00bfff', 0.4);
 
+// Round-3 cinematic skill visuals (cast-presentation path)
+explosions.auraBurst(new THREE.Vector3(3, 1.3, 3), 0xb026ff, 9);
+explosions.vortex(new THREE.Vector3(-6, 0, 6), 0x99ccff, 14, 2);
+explosions.megaShockwave(new THREE.Vector3(0, 0, -8), 50, 0x00bfff);
+explosions.beam(new THREE.Vector3(2, 1.6, 0), new THREE.Vector3(20, 2, -14), 2, 0xff0044);
+{
+  // Pump a few frames so the new pools animate + expire cleanly
+  for (let i = 0; i < 120; i++) explosions.update(1 / 60);
+}
+ok('cinematic cast visuals (auraBurst / vortex / megaShockwave / beam) animated 120 frames');
+
 // ---------------------------------------------------------------------------
 // CORE SPEC TEST: camera shake must be strictly translational (no rotation)
 // ---------------------------------------------------------------------------
@@ -234,6 +245,7 @@ const fakeHazards = [];
 {
   const fakeGame = {
     player, enemies, lightning, explosions, sound,
+    inGame: true,
     equippedSword: 'gravity_blade',
     equippedFruit: 'rimefracture',
     gunFireCooldown: 0,
@@ -278,6 +290,49 @@ console.log('\n[Skill cast test]');
     }
   }
   ok(`cast ${count} skills across ${Object.keys(SKILL_DATABASE).length} sources without throwing`);
+}
+
+// ---------------------------------------------------------------------------
+// XP / LEVEL / STAT POINTS test (round 3)
+// ---------------------------------------------------------------------------
+console.log('\n[XP / Level / Stats test]');
+{
+  const fakeEngine = { player, onPlayerLevelUp: () => {} };
+  const em = new EnemyManager(scene, explosions, fakeEngine);
+
+  // Kill grants XP (world level 1 drone = base 60)
+  const e = em._spawn('drone', new THREE.Vector3(5, 0, 5));
+  e.takeDamage(999999, false, 'fruit');
+  if (player.xp !== 60) fail(`kill should grant 60 XP (got ${player.xp})`);
+  else ok('kill granted base XP (60) to player');
+
+  // Enemy level scaling: +50% of base per level above 1 (level 3 = x2)
+  const e2 = em._spawn('drone', new THREE.Vector3(8, 0, 8));
+  e2.level = 3;
+  if (e2.getXpReward() !== 120) fail(`enemy XP scaling wrong (got ${e2.getXpReward()}, want 120)`);
+  else ok('enemy XP scales +50%/level above 1 (level 3 -> 120 XP)');
+
+  // Bulk stat allocation (user can enter any value at once)
+  player.statPoints = 10;
+  if (!player.spendStatPoints('health', 5)) fail('spendStatPoints(health, 5) rejected');
+  if (player.maxHp !== 1000 + 5 * 50) fail(`maxHp after stats wrong (got ${player.maxHp})`);
+  if (player.spendStatPoints('gun', player.statPoints + 10)) fail('over-allocation should be rejected!');
+  ok(`bulk stat allocation works (maxHp ${player.maxHp}, +50/point, over-alloc rejected)`);
+
+  // Level cap at exactly 100,000,000 with no overflow
+  player.level = 99999999;
+  player.xp = 0;
+  player.gainXp(player.xpNeeded());
+  if (player.level !== 100000000) fail(`level cap broken (got ${player.level})`);
+  else ok(`level caps at exactly ${player.level.toLocaleString('en-US')} with no overflow`);
+
+  // World level rises every 15 kills
+  em.worldLevel = 1;
+  em.totalKills = 14;
+  const e3 = em._spawn('drone', new THREE.Vector3(11, 0, 11));
+  e3.takeDamage(999999, false, 'fruit');
+  if (em.worldLevel !== 2) fail(`world level should rise at 15 kills (got ${em.worldLevel})`);
+  else ok('world level rises every 15 kills (15th kill -> world level 2)');
 }
 
 // ---------------------------------------------------------------------------

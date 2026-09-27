@@ -15,6 +15,8 @@ import { SkillBarUI } from './ui/skill_bar.js';
 import { InventoryUI } from './ui/inventory_ui.js';
 import { SettingsModal } from './ui/settings_modal.js';
 import { SupercellPickerModal } from './ui/supercell_picker.js';
+import { StatsModal } from './ui/stats_modal.js';
+import { formatNumber } from './utils.js';
 
 /**
  * 3D 1090 Fruits - Core Game Engine
@@ -77,9 +79,9 @@ export class GameEngine {
     // 4. Arena & World (renderer passed in for PMREM environment reflections)
     this.arena = new Arena(this.scene, this.renderer);
 
-    // 5. Player & Combat Entities
+    // 5. Player & Combat Entities (engine passed for kill->XP flow)
     this.player = new Player(this.scene, this.sound);
-    this.enemies = new EnemyManager(this.scene, this.explosions);
+    this.enemies = new EnemyManager(this.scene, this.explosions, this);
 
     // Visible tracer bolts for passive guns (pooled)
     this.tracerPool = [];
@@ -96,8 +98,9 @@ export class GameEngine {
     }
 
     // Active Equipment State (Strictly separated fruit & sword)
-    this.equippedFruit = 'gravity';
-    this.equippedSword = 'gravity_blade';
+    // DEFAULT: everything starts UNEQUIPPED - the player chooses their loadout
+    this.equippedFruit = 'none';
+    this.equippedSword = 'none';
 
     // Active Floor Hazard Pits (Firepits, lava pits)
     this.activeHazards = [];
@@ -121,8 +124,11 @@ export class GameEngine {
     this.inventoryUI = new InventoryUI(this);
     this.settingsModal = new SettingsModal(this);
     this.supercellPicker = new SupercellPickerModal(this);
+    this.statsModal = new StatsModal(this);
 
+    this.initLoadingScreen();
     this.initGlobalEvents();
+    this.initUiSounds();
     this.skillBar.refresh();
 
     // Start Main Loop
@@ -176,11 +182,13 @@ export class GameEngine {
     if (helpBtn && helpModal) {
       helpBtn.addEventListener('click', () => {
         helpModal.style.display = 'flex';
+        this.sound.playUiOpen();
       });
     }
     if (closeHelp && helpModal) {
       closeHelp.addEventListener('click', () => {
         helpModal.style.display = 'none';
+        this.sound.playUiClose();
       });
     }
 
@@ -278,6 +286,127 @@ export class GameEngine {
     this.supercellPicker.open();
   }
 
+  // ---------------------------------------------------------------
+  // LOADING SCREEN: cinematic entry with PLAY + SETTINGS
+  // ---------------------------------------------------------------
+  initLoadingScreen() {
+    this.inGame = false;
+    const loading = document.getElementById('loading-screen');
+    const playBtn = document.getElementById('btn-loading-play');
+    const settingsBtn = document.getElementById('btn-loading-settings');
+
+    if (settingsBtn) {
+      settingsBtn.addEventListener('click', () => {
+        this.sound.playUiClick();
+        this.settingsModal.open();
+      });
+    }
+
+    if (playBtn) {
+      playBtn.addEventListener('click', () => {
+        if (this.inGame) return;
+        this.inGame = true;
+        this.sound.init(); // ensure audio unlocked on this gesture
+        this.sound.playGameStart();
+
+        // Reveal the world: fade out the loader, animate the HUD in
+        document.body.classList.remove('pre-game');
+        document.body.classList.add('in-game');
+        if (loading) {
+          loading.classList.add('loading-exit');
+          setTimeout(() => { loading.style.display = 'none'; }, 900);
+        }
+        // Big cinematic deploy banner
+        this.showSkillBanner('DEPLOYED', '#00f0ff');
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // UI SOUNDS: global click / hover delegation for every button
+  // ---------------------------------------------------------------
+  initUiSounds() {
+    let lastHover = 0;
+    document.addEventListener('pointerover', (e) => {
+      const btn = e.target.closest && e.target.closest('button');
+      if (!btn) return;
+      const now = performance.now();
+      if (now - lastHover < 70) return; // throttle rapid hovers
+      lastHover = now;
+      this.sound.playUiHover();
+    }, true);
+
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('button');
+      if (btn) this.sound.playUiClick();
+    }, true);
+  }
+
+  // ---------------------------------------------------------------
+  // LEVEL-UP: banner + sound + flash when the operative levels up
+  // ---------------------------------------------------------------
+  onPlayerLevelUp(levelsGained, newLevel) {
+    this.sound.playLevelUp();
+    this.triggerScreenFlash('#ffd75e', 0.5);
+    const banner = document.getElementById('level-up-banner');
+    if (banner) {
+      const sub = document.getElementById('level-up-sub');
+      if (sub) sub.textContent = `+${levelsGained * 3} STAT POINTS`;
+      banner.classList.remove('show');
+      // force reflow so the animation restarts
+      void banner.offsetWidth;
+      banner.classList.add('show');
+    }
+    this.updateLevelHUD();
+  }
+
+  /**
+   * Show a big cinematic anime-style skill name banner.
+   */
+  showSkillBanner(text, colorHex = '#00f0ff') {
+    const banner = document.getElementById('skill-banner');
+    if (!banner) return;
+    banner.textContent = text;
+    banner.style.setProperty('--banner-color', colorHex);
+    banner.classList.remove('show');
+    void banner.offsetWidth;
+    banner.classList.add('show');
+  }
+
+  /**
+   * Update Level / XP / Stat-Points HUD card.
+   */
+  updateLevelHUD() {
+    const p = this.player;
+    const lvlEl = document.getElementById('hud-level');
+    const xpBar = document.getElementById('player-xp-bar');
+    const xpText = document.getElementById('player-xp-text');
+    const spEl = document.getElementById('hud-stat-points');
+    const worldEl = document.getElementById('hud-world-level');
+
+    if (lvlEl) lvlEl.textContent = `LVL ${formatNumber(p.level)}`;
+    if (xpBar && xpText) {
+      const need = p.xpNeeded();
+      const pct = need > 0 ? Math.min(100, (p.xp / need) * 100) : 100;
+      xpBar.style.width = `${pct}%`;
+      xpText.textContent = `${formatNumber(p.xp)} / ${formatNumber(need)} XP`;
+    }
+    if (spEl) {
+      spEl.textContent = p.statPoints > 0 ? `+${p.statPoints}` : '0';
+      spEl.classList.toggle('stat-points-ready', p.statPoints > 0);
+    }
+    // STATS button corner badge
+    const badge = document.getElementById('stats-badge-hint');
+    if (badge) {
+      badge.textContent = p.statPoints;
+      badge.style.display = p.statPoints > 0 ? 'flex' : 'none';
+    }
+    if (worldEl) worldEl.textContent = `WORLD LVL ${this.enemies.worldLevel}`;
+
+    // Low-HP screen pulse
+    document.body.classList.toggle('low-hp', p.hp > 0 && (p.hp / p.maxHp) < 0.25);
+  }
+
   triggerScreenFlash(colorHex = '#ff0033', durationSec = 0.5) {
     const flash = document.getElementById('screen-flash');
     if (!flash) return;
@@ -356,6 +485,7 @@ export class GameEngine {
    * M1 Melee Attack logic for equipped weapons
    */
   handleM1Attack() {
+    if (!this.inGame) return; // ignore clicks behind the loading screen
     const didSwing = this.player.performM1();
     if (!didSwing) return;
 
@@ -393,11 +523,12 @@ export class GameEngine {
       }
     }
 
-    // Hit enemies in front
+    // Hit enemies in front (bare-fist strikes when no sword equipped)
+    const bareFist = (sword === 'none');
     const hitEnemies = this.enemies.getEnemiesInRadius(hitCenter, 5.0);
     for (const e of hitEnemies) {
-      const dmg = 350 + this.player.comboStep * 80;
-      e.takeDamage(dmg, this.player.comboStep === 3);
+      const dmg = (bareFist ? 250 : 350) + this.player.comboStep * 80;
+      e.takeDamage(dmg, this.player.comboStep === 3, 'sword');
       e.applyKnockback(forward, 12.0);
     }
   }
@@ -406,6 +537,7 @@ export class GameEngine {
    * Manual Gun Fire for Rimefracture / Wildfire passives
    */
   firePassiveGunManual() {
+    if (!this.inGame) return; // ignore keypresses behind the loading screen
     if (this.gunFireCooldown > 0) return;
 
     const fruit = this.equippedFruit;
@@ -450,11 +582,11 @@ export class GameEngine {
         // Explode into flying fragments
         const enemies = this.enemies.getEnemiesInRadius(targetPos, 40.0);
         for (const e of enemies) {
-          e.takeDamage(dmg, true);
+          e.takeDamage(dmg, true, 'gun');
           if (inState) e.applyStatus('freeze', 3.0);
         }
       } else {
-        if (closest.enemy) closest.enemy.takeDamage(dmg, false);
+        if (closest.enemy) closest.enemy.takeDamage(dmg, false, 'gun');
       }
     } else if (fruit === 'wildfire') {
       // SPECIFICATION:
@@ -481,11 +613,11 @@ export class GameEngine {
         for (const e of enemies) {
           const under50 = e.hp < (e.maxHp * 0.5);
           const finalDmg = under50 ? (dmg * 10.0) : dmg;
-          e.takeDamage(finalDmg, true);
+          e.takeDamage(finalDmg, true, 'gun');
           e.applyStatus('burn', 3.0);
         }
       } else {
-        if (closest.enemy) closest.enemy.takeDamage(dmg, false);
+        if (closest.enemy) closest.enemy.takeDamage(dmg, false, 'gun');
       }
     }
   }
@@ -508,6 +640,9 @@ export class GameEngine {
   }
 
   updateHUDValues() {
+    // Level / XP / Stat Points / World Level
+    this.updateLevelHUD();
+
     // Player HP Bar
     const hpBar = document.getElementById('player-hp-bar');
     const hpText = document.getElementById('player-hp-text');

@@ -1,18 +1,20 @@
 import * as THREE from 'three';
 
 /**
- * 3D 1090 Fruits - Enemy Combat System
+ * 3D 1090 Fruits - Enemy Combat System (REMODELED ROSTER)
  *
- * Supports Normal Enemies (can be instant-killed / blinded),
- * Elite Mechs (immune to instant-kill; takes 50% max HP instead),
- * Titan Bosses, and Target Dummies.
+ *  - Seeker Drones: angular quad-rotor hunters with spinning rotors,
+ *    blinking nav lights, gyro eye core, hover bob & player-facing tilt
+ *  - Siege Mechs (elite): heavy bipedal walkers with articulated legs,
+ *    twin shoulder cannons, glowing core spine, back fins
+ *  - Titan Warden (boss): colossal layered-armor titan with arm blades,
+ *    pulsing reactor cage, rotating halo ring and eye slits
+ *  - Training Dummies: target posts that char/darken as they take damage
  *
- * VISUALS:
- *  - Drones: hovering sphere core, gyro ring, thruster glow, bob & tilt
- *  - Elite: walking mech chassis, glowing core stripe, cannon muzzles
- *  - Boss: colossal titan with pulsing reactor core + eye slits + hovers
- *  - Status visuals: freeze tint, burn flicker, stun spin, eye HP flash
- *  - Death: real explosion burst with debris + light
+ * LEVELING:
+ *  - Enemies inherit the arena's WORLD LEVEL (rises as you kill)
+ *  - Each enemy level above 1 adds +50% XP reward
+ *  - Kills flow: Enemy.die() -> manager.onKill() -> player.gainXp()
  */
 
 function softGlowTexture() {
@@ -30,22 +32,25 @@ function softGlowTexture() {
 }
 
 export class Enemy {
-  constructor(scene, type = 'drone', position = new THREE.Vector3(0, 0, 0), explosionManager = null) {
+  constructor(scene, type = 'drone', position = new THREE.Vector3(0, 0, 0), explosionManager = null, level = 1) {
     this.scene = scene;
     this.type = type; // 'dummy' | 'drone' | 'elite' | 'boss'
     this.dead = false;
     this.explosions = explosionManager;
+    this.level = level;
+    this.manager = null; // set by EnemyManager
     this.animTime = Math.random() * 10;
 
-    // HP Configuration
+    // HP Configuration (scales with world level for late-game)
+    const levelScale = 1 + (level - 1) * 0.15;
     if (type === 'dummy') {
       this.maxHp = 2500;
     } else if (type === 'drone') {
-      this.maxHp = 800;
+      this.maxHp = 800 * levelScale;
     } else if (type === 'elite') {
-      this.maxHp = 6500;
+      this.maxHp = 6500 * levelScale;
     } else if (type === 'boss') {
-      this.maxHp = 35000;
+      this.maxHp = 35000 * levelScale;
     } else {
       this.maxHp = 1000;
     }
@@ -59,9 +64,7 @@ export class Enemy {
       burned: 0,
       burnTickTimer: 0,
       imprisoned: 0,
-      hacked: false, // If hacked, attacks heal player!
-      bleedTicks: 0,
-      bleedTimer: 0
+      hacked: false,
     };
 
     // Movement & Knockback
@@ -77,6 +80,13 @@ export class Enemy {
     this.coreMats = [];
     this.baseCoreColor = new THREE.Color();
 
+    // Per-type animation handles
+    this.rotors = [];
+    this.navLights = [];
+    this.eliteLegs = [];
+    this.bossRing = null;
+    this.dummyBodyMat = null;
+
     // Create 3D Model
     this.createModel(position);
   }
@@ -88,192 +98,301 @@ export class Enemy {
     const glowTex = softGlowTexture();
 
     if (this.type === 'dummy') {
-      // Cylindrical training dummy with glowing target rings
-      const geo = new THREE.CylinderGeometry(0.7, 0.7, 2.2, 16);
-      const mat = new THREE.MeshStandardMaterial({ color: 0x664411, metalness: 0.35, roughness: 0.6 });
-      const body = new THREE.Mesh(geo, mat);
+      // ===================== TRAINING DUMMY =====================
+      const bodyMat = new THREE.MeshStandardMaterial({ color: 0x664411, metalness: 0.35, roughness: 0.6 });
+      this.dummyBodyMat = bodyMat;
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 2.2, 16), bodyMat);
       body.position.y = 1.1;
       body.castShadow = true;
       this.mesh.add(body);
 
       const ringMat = new THREE.MeshBasicMaterial({ color: 0xffcc33, fog: false });
+      this.dummyRings = [];
       for (let i = 0; i < 3; i++) {
         const ring = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.03, 6, 24), ringMat);
         ring.position.y = 0.5 + i * 0.6;
         ring.rotation.x = Math.PI / 2;
         this.mesh.add(ring);
+        this.dummyRings.push(ring);
         this.coreMats.push(ringMat);
       }
 
-      // Base pad
-      const padMat = new THREE.MeshStandardMaterial({ color: 0x223344, metalness: 0.8, roughness: 0.3 });
-      const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.3, 0.15, 20), padMat);
+      const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.3, 0.15, 20),
+        new THREE.MeshStandardMaterial({ color: 0x223344, metalness: 0.8, roughness: 0.3 }));
       pad.position.y = 0.08;
       this.mesh.add(pad);
 
     } else if (this.type === 'drone') {
+      // ===================== SEEKER DRONE =====================
       this.bodyGroup = new THREE.Group();
       this.mesh.add(this.bodyGroup);
 
-      // Core sphere
-      const coreGeo = new THREE.SphereGeometry(0.7, 20, 16);
+      // Faceted core (octahedron)
       const coreMat = new THREE.MeshStandardMaterial({ color: 0x24354e, metalness: 0.9, roughness: 0.25 });
-      const core = new THREE.Mesh(coreGeo, coreMat);
+      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.62, 0), coreMat);
       core.position.y = 1.6;
+      core.scale.set(1, 1.15, 1);
       core.castShadow = true;
       this.bodyGroup.add(core);
 
-      // Eye
-      const eyeGeo = new THREE.SphereGeometry(0.24, 12, 10);
+      // Glowing eye slit
       this.eyeMat = new THREE.MeshBasicMaterial({ color: 0xff2a55, fog: false });
-      const eye = new THREE.Mesh(eyeGeo, this.eyeMat);
-      eye.position.set(0, 1.65, 0.55);
+      const eye = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.09, 0.1), this.eyeMat);
+      eye.position.set(0, 1.66, 0.52);
       this.bodyGroup.add(eye);
       this.coreMats.push(this.eyeMat);
 
-      // Gyro ring
-      const ringMat = new THREE.MeshBasicMaterial({ color: 0x00c8ff, transparent: true, opacity: 0.7, fog: false });
-      this.droneRing = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.05, 8, 32), ringMat);
-      this.droneRing.position.y = 1.6;
-      this.droneRing.rotation.x = Math.PI / 2;
-      this.bodyGroup.add(this.droneRing);
-      this.coreMats.push(ringMat);
-
-      // 4 thruster pods
-      const podMat = new THREE.MeshStandardMaterial({ color: 0x141e2c, metalness: 0.85, roughness: 0.35 });
+      // 4 diagonal rotor arms
+      const armMat = new THREE.MeshStandardMaterial({ color: 0x141e2c, metalness: 0.85, roughness: 0.35 });
+      const hubGeo = new THREE.BoxGeometry(0.1, 0.1, 1.0);
+      const rotorGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.03, 16);
+      const rotorMat = new THREE.MeshStandardMaterial({
+        color: 0x0d141f, metalness: 0.7, roughness: 0.5,
+      });
+      const bladeMat = new THREE.MeshBasicMaterial({
+        color: 0x88aacc, transparent: true, opacity: 0.28,
+        side: THREE.DoubleSide, depthWrite: false, fog: false,
+      });
       for (let i = 0; i < 4; i++) {
         const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-        const pod = new THREE.Mesh(new THREE.CapsuleGeometry(0.14, 0.25, 4, 8), podMat);
-        pod.position.set(Math.cos(a) * 0.95, 1.2, Math.sin(a) * 0.95);
-        pod.rotation.z = Math.PI / 2;
-        pod.rotation.y = -a;
-        pod.castShadow = true;
-        this.bodyGroup.add(pod);
+        const arm = new THREE.Mesh(hubGeo, armMat);
+        arm.position.set(Math.cos(a) * 0.85, 1.6, Math.sin(a) * 0.85);
+        arm.rotation.y = -a + Math.PI / 2;
+        arm.castShadow = true;
+        this.bodyGroup.add(arm);
+
+        const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.16, 10), armMat);
+        hub.position.set(Math.cos(a) * 1.3, 1.68, Math.sin(a) * 1.3);
+        this.bodyGroup.add(hub);
+
+        const rotor = new THREE.Mesh(rotorGeo, rotorMat);
+        rotor.position.set(Math.cos(a) * 1.3, 1.74, Math.sin(a) * 1.3);
+        this.bodyGroup.add(rotor);
+        this.rotors.push(rotor);
+
+        // Spinning blade disc (translucent)
+        const disc = new THREE.Mesh(new THREE.CircleGeometry(0.44, 20), bladeMat);
+        disc.rotation.x = -Math.PI / 2;
+        disc.position.set(Math.cos(a) * 1.3, 1.765, Math.sin(a) * 1.3);
+        this.bodyGroup.add(disc);
+        this.rotors.push(disc);
+
+        // Nav light on every other arm (red blinkers)
+        if (i % 2 === 0) {
+          const navMat = new THREE.MeshBasicMaterial({ color: 0xff3344, fog: false });
+          const nav = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), navMat);
+          nav.position.set(Math.cos(a) * 1.3, 1.79, Math.sin(a) * 1.3);
+          this.bodyGroup.add(nav);
+          this.navLights.push(navMat);
+        }
       }
 
-      // Under-glow thruster beam
+      // Under-glow thruster
       this.droneGlowMat = new THREE.SpriteMaterial({
-        map: glowTex, color: 0x00aaff, transparent: true, opacity: 0.55,
+        map: glowTex, color: 0x00aaff, transparent: true, opacity: 0.5,
         depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
       });
       this.droneGlow = new THREE.Sprite(this.droneGlowMat);
-      this.droneGlow.scale.set(2.2, 2.2, 1);
-      this.droneGlow.position.y = 0.7;
+      this.droneGlow.scale.set(2.0, 2.0, 1);
+      this.droneGlow.position.y = 0.8;
       this.bodyGroup.add(this.droneGlow);
 
     } else if (this.type === 'elite') {
+      // ===================== SIEGE MECH (ELITE) =====================
       this.bodyGroup = new THREE.Group();
       this.mesh.add(this.bodyGroup);
 
-      // Chassis
+      // Wide heavy hip section
+      const hipMat = new THREE.MeshStandardMaterial({ color: 0x2a1522, metalness: 0.85, roughness: 0.35 });
+      const hip = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.7, 1.5), hipMat);
+      hip.position.y = 1.7;
+      hip.castShadow = true;
+      this.bodyGroup.add(hip);
+
+      // Torso with sloped chest
       const chassisMat = new THREE.MeshStandardMaterial({ color: 0x3d2030, metalness: 0.9, roughness: 0.3 });
-      const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.6, 1.6), chassisMat);
-      body.position.y = 2.35;
-      body.castShadow = true;
-      this.bodyGroup.add(body);
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(2.1, 1.2, 1.5), chassisMat);
+      torso.position.y = 2.7;
+      torso.castShadow = true;
+      this.bodyGroup.add(torso);
+      const chest = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 1.2), hipMat);
+      chest.position.set(0, 3.5, 0.1);
+      chest.rotation.x = -0.2;
+      chest.castShadow = true;
+      this.bodyGroup.add(chest);
 
-      // Sloped upper armor
-      const upperMat = new THREE.MeshStandardMaterial({ color: 0x2a1522, metalness: 0.85, roughness: 0.35 });
-      const upper = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 1.3), upperMat);
-      upper.position.y = 3.35;
-      upper.castShadow = true;
-      this.bodyGroup.add(upper);
-
-      // Glowing core stripe
+      // Glowing core spine (vertical stripe)
       this.eliteCoreMat = new THREE.MeshBasicMaterial({ color: 0xff3355, fog: false });
-      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.2, 1.62), this.eliteCoreMat);
-      stripe.position.y = 2.35;
-      this.bodyGroup.add(stripe);
+      const spine = new THREE.Mesh(new THREE.BoxGeometry(0.22, 2.6, 0.12), this.eliteCoreMat);
+      spine.position.set(0, 2.5, 0.78);
+      this.bodyGroup.add(spine);
       this.coreMats.push(this.eliteCoreMat);
 
-      // Head sensor
+      // Head sensor block
       this.eliteEyeMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, fog: false });
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.5), upperMat);
-      head.position.set(0, 3.9, 0.3);
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.55), chassisMat);
+      head.position.set(0, 4.05, 0.25);
       this.bodyGroup.add(head);
-      const slit = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.08, 0.1), this.eliteEyeMat);
-      slit.position.set(0, 3.9, 0.56);
+      const slit = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.08), this.eliteEyeMat);
+      slit.position.set(0, 4.05, 0.55);
       this.bodyGroup.add(slit);
       this.coreMats.push(this.eliteEyeMat);
 
-      // Dual cannons
-      const gunGeo = new THREE.CylinderGeometry(0.18, 0.22, 1.8, 10);
+      // Twin shoulder cannons (long barrels + glow muzzles)
       const gunMat = new THREE.MeshStandardMaterial({ color: 0x0d0d12, metalness: 0.9, roughness: 0.4 });
       const muzzleMat = new THREE.MeshBasicMaterial({ color: 0xff6600, fog: false });
       for (const sx of [-1, 1]) {
-        const gun = new THREE.Mesh(gunGeo, gunMat);
+        const shoulder = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.7, 0.9), hipMat);
+        shoulder.position.set(sx * 1.5, 3.3, 0);
+        shoulder.castShadow = true;
+        this.bodyGroup.add(shoulder);
+
+        const gun = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 2.2, 10), gunMat);
         gun.rotation.x = Math.PI / 2;
-        gun.position.set(sx * 1.3, 2.5, 0.7);
+        gun.position.set(sx * 1.45, 3.15, 0.9);
         gun.castShadow = true;
         this.bodyGroup.add(gun);
-        const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.1, 10), muzzleMat);
+
+        const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.16, 10), muzzleMat);
         muzzle.rotation.x = Math.PI / 2;
-        muzzle.position.set(sx * 1.3, 2.5, 1.65);
+        muzzle.position.set(sx * 1.45, 3.15, 2.05);
         this.bodyGroup.add(muzzle);
         this.coreMats.push(muzzleMat);
       }
 
-      // Walking legs
+      // Back fins (swept triangles)
+      const finMat = new THREE.MeshStandardMaterial({ color: 0x1c2532, metalness: 0.85, roughness: 0.4 });
+      for (const sx of [-1, 1]) {
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 0.9), finMat);
+        fin.position.set(sx * 0.9, 3.4, -0.85);
+        fin.rotation.x = 0.35;
+        fin.rotation.z = sx * -0.3;
+        fin.castShadow = true;
+        this.bodyGroup.add(fin);
+      }
+
+      // Articulated legs: thigh + knee + shin + foot (2-segment walk)
       const legMat = new THREE.MeshStandardMaterial({ color: 0x1c2532, metalness: 0.85, roughness: 0.4 });
-      this.eliteLegs = [];
       for (const sx of [-1, 1]) {
         const leg = new THREE.Group();
-        leg.position.set(sx * 0.7, 1.6, 0);
-        const thigh = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.6, 4, 10), legMat);
-        thigh.position.y = -0.4;
+        leg.position.set(sx * 0.8, 1.7, 0);
+
+        const thigh = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.7, 4, 10), legMat);
+        thigh.position.y = -0.45;
         thigh.castShadow = true;
         leg.add(thigh);
-        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.8), legMat);
-        foot.position.set(0, -0.95, 0.1);
+
+        const knee = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), hipMat);
+        knee.position.set(0, -0.95, 0.1);
+        leg.add(knee);
+
+        const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.6, 4, 10), legMat);
+        shin.position.set(0, -1.5, 0);
+        shin.castShadow = true;
+        leg.add(shin);
+
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.9), legMat);
+        foot.position.set(0, -1.95, 0.12);
         foot.castShadow = true;
         leg.add(foot);
+        // Glowing foot strip
+        const footGlow = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.05, 0.2), this.eliteCoreMat);
+        footGlow.position.set(0, -1.9, 0.45);
+        leg.add(footGlow);
+
         this.bodyGroup.add(leg);
         this.eliteLegs.push(leg);
       }
 
     } else if (this.type === 'boss') {
+      // ===================== TITAN WARDEN (BOSS) =====================
       this.bodyGroup = new THREE.Group();
       this.mesh.add(this.bodyGroup);
 
-      // Colossal hull
+      // Layered colossal hull (3 stacked armor plates)
       const bossMat = new THREE.MeshStandardMaterial({
         color: 0x140d20, emissive: 0x220044, emissiveIntensity: 0.5,
         metalness: 0.85, roughness: 0.3
       });
-      const body = new THREE.Mesh(new THREE.BoxGeometry(6.0, 8.0, 4.6), bossMat);
-      body.position.y = 5.6;
-      body.castShadow = true;
-      this.bodyGroup.add(body);
+      const plateMat = new THREE.MeshStandardMaterial({ color: 0x1d1230, metalness: 0.9, roughness: 0.3 });
 
-      // Angular shoulder armor
-      const shoulderMat = new THREE.MeshStandardMaterial({ color: 0x1d1230, metalness: 0.9, roughness: 0.3 });
+      const base = new THREE.Mesh(new THREE.BoxGeometry(6.4, 3.0, 4.8), bossMat);
+      base.position.y = 3.4;
+      base.castShadow = true;
+      this.bodyGroup.add(base);
+
+      const mid = new THREE.Mesh(new THREE.BoxGeometry(5.6, 2.6, 4.2), plateMat);
+      mid.position.y = 5.9;
+      mid.castShadow = true;
+      this.bodyGroup.add(mid);
+
+      const top = new THREE.Mesh(new THREE.BoxGeometry(4.4, 2.2, 3.6), bossMat);
+      top.position.y = 8.0;
+      top.castShadow = true;
+      this.bodyGroup.add(top);
+
+      // Angular shoulder wedges
       for (const sx of [-1, 1]) {
-        const sh = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.4, 3.4), shoulderMat);
-        sh.position.set(sx * 4.2, 7.4, 0);
-        sh.rotation.z = sx * -0.25;
+        const sh = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.8, 3.6), plateMat);
+        sh.position.set(sx * 4.6, 7.6, 0);
+        sh.rotation.z = sx * -0.28;
         sh.castShadow = true;
         this.bodyGroup.add(sh);
+
+        // Shoulder edge light
+        const shLight = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.12, 0.2), this.bossEdgeMat || (this.bossEdgeMat = new THREE.MeshBasicMaterial({ color: 0xff4488, fog: false })));
+        shLight.position.set(sx * 4.6, 9.0, 1.2);
+        shLight.rotation.z = sx * -0.28;
+        this.bodyGroup.add(shLight);
       }
 
-      // Glowing reactor core (pulses)
+      // Glowing reactor core + icosahedron cage
       this.bossReactorMat = new THREE.MeshBasicMaterial({ color: 0xff0055, fog: false });
-      this.bossReactor = new THREE.Mesh(new THREE.SphereGeometry(1.6, 20, 16), this.bossReactorMat);
-      this.bossReactor.position.set(0, 6.2, 2.35);
+      this.bossReactor = new THREE.Mesh(new THREE.SphereGeometry(1.5, 20, 16), this.bossReactorMat);
+      this.bossReactor.position.set(0, 6.2, 2.15);
       this.bodyGroup.add(this.bossReactor);
       this.coreMats.push(this.bossReactorMat);
 
-      // Reactor cage
       const cageMat = new THREE.MeshBasicMaterial({ color: 0xff4488, wireframe: true, transparent: true, opacity: 0.5, fog: false });
-      this.bossCage = new THREE.Mesh(new THREE.IcosahedronGeometry(2.2, 0), cageMat);
+      this.bossCage = new THREE.Mesh(new THREE.IcosahedronGeometry(2.1, 0), cageMat);
       this.bossCage.position.copy(this.bossReactor.position);
       this.bodyGroup.add(this.bossCage);
 
-      // Eye slit
+      // Triple eye slits
       this.bossEyeMat = new THREE.MeshBasicMaterial({ color: 0xff0033, fog: false });
-      const eye = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.35, 0.3), this.bossEyeMat);
-      eye.position.set(0, 8.9, 2.35);
-      this.bodyGroup.add(eye);
-      this.coreMats.push(this.bossEyeMat);
+      for (const sx of [-1, 0, 1]) {
+        const eye = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.3, 0.25), this.bossEyeMat);
+        eye.position.set(sx * 1.3, 9.3, 1.85);
+        eye.rotation.z = sx * -0.15;
+        this.bodyGroup.add(eye);
+        this.coreMats.push(this.bossEyeMat);
+      }
+
+      // Massive arm blades
+      const bladeMat = new THREE.MeshStandardMaterial({ color: 0x1a1030, emissive: 0x330055, emissiveIntensity: 0.6, metalness: 0.95, roughness: 0.2 });
+      for (const sx of [-1, 1]) {
+        const arm = new THREE.Group();
+        arm.position.set(sx * 4.2, 5.5, 0.5);
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.7, 5.0, 1.4), bladeMat);
+        blade.position.y = -2.5;
+        blade.rotation.z = sx * 0.12;
+        blade.castShadow = true;
+        arm.add(blade);
+        const bladeEdge = new THREE.Mesh(new THREE.BoxGeometry(0.1, 5.0, 1.5), this.bossEdgeMat);
+        bladeEdge.position.set(sx * -0.35, -2.5, 0);
+        arm.add(bladeEdge);
+        this.bodyGroup.add(arm);
+      }
+
+      // Rotating halo ring around the titan
+      this.bossRingMat = new THREE.MeshBasicMaterial({
+        color: 0x9933ff, transparent: true, opacity: 0.55,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      this.bossRing = new THREE.Mesh(new THREE.TorusGeometry(6.5, 0.12, 8, 80), this.bossRingMat);
+      this.bossRing.position.y = 5.6;
+      this.bossRing.rotation.x = Math.PI / 2.4;
+      this.bodyGroup.add(this.bossRing);
 
       // Hover under-glow
       this.bossGlowMat = new THREE.SpriteMaterial({
@@ -281,11 +400,10 @@ export class Enemy {
         depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
       });
       this.bossGlow = new THREE.Sprite(this.bossGlowMat);
-      this.bossGlow.scale.set(11, 11, 1);
+      this.bossGlow.scale.set(12, 12, 1);
       this.bossGlow.position.y = 0.8;
       this.bodyGroup.add(this.bossGlow);
 
-      // Record base core color for status retinting
       this.baseCoreColor.setHex(0xff0055);
     }
 
@@ -303,19 +421,38 @@ export class Enemy {
         m.color.setHex(0xffee44);
       } else if (this.type === 'boss') {
         m.color.copy(this.baseCoreColor);
+      } else if (this.type === 'drone') {
+        m.color.setHex(0xff2a55);
+      } else if (this.type === 'elite') {
+        m.color.setHex(0xff3355);
       } else {
-        m.color.setHex(this.type === 'drone' ? 0xff2a55 : (this.type === 'elite' ? 0xff3355 : 0xffcc33));
+        m.color.setHex(0xffcc33);
       }
     }
   }
 
-  takeDamage(amount, isCrit = false, sourceDesc = '') {
+  /** Dummies char and darken as they lose HP. */
+  _updateDummyWear() {
+    if (!this.dummyBodyMat) return;
+    const pct = this.hp / this.maxHp;
+    // Blend from fresh wood to burnt dark as HP drops
+    this.dummyBodyMat.color.setHex(0x664411).lerp(new THREE.Color(0x1a1008), 1.0 - pct);
+  }
+
+  takeDamage(amount, isCrit = false, source = 'other') {
     if (this.dead) return;
+
+    // Stat-based damage bonus by attack source (fruit / sword / gun)
+    if (this.manager && source !== 'status' && source !== 'other') {
+      amount += this.manager.getDamageBonus(source);
+    }
 
     this.hp -= amount;
 
     // Spawn floating damage text on UI
     this.spawnFloatingText(Math.round(amount), isCrit ? 'crit' : 'normal');
+
+    if (this.type === 'dummy') this._updateDummyWear();
 
     if (this.hp <= 0) {
       this.hp = 0;
@@ -358,11 +495,7 @@ export class Enemy {
       if (!this.cageMesh) {
         const cageGeo = new THREE.CylinderGeometry(2.0, 2.0, 4.0, 16, 1, true);
         const cageMat = new THREE.MeshBasicMaterial({
-          color: 0xff0044,
-          wireframe: true,
-          transparent: true,
-          opacity: 0.8,
-          fog: false
+          color: 0xff0044, wireframe: true, transparent: true, opacity: 0.8, fog: false,
         });
         this.cageMesh = new THREE.Mesh(cageGeo, cageMat);
         this.cageMesh.position.y = 2.0;
@@ -382,7 +515,6 @@ export class Enemy {
     const layer = document.getElementById('damage-numbers-layer');
     if (!layer || !window.__activeCamera) return;
 
-    // Project 3D position to 2D screen coordinates
     const screenPos = this.mesh.position.clone();
     screenPos.y += (this.type === 'boss' ? 8 : (this.type === 'elite' ? 3.5 : 2.0));
     screenPos.project(window.__activeCamera);
@@ -390,7 +522,6 @@ export class Enemy {
     const x = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
     const y = (-(screenPos.y * 0.5) + 0.5) * window.innerHeight;
 
-    // Only show if in front of camera
     if (screenPos.z < 1.0) {
       const el = document.createElement('div');
       el.className = `floating-dmg ${style}`;
@@ -405,7 +536,18 @@ export class Enemy {
     }
   }
 
+  /** XP reward: base per type, +50% of base per enemy level above 1. */
+  getXpReward() {
+    let base = 0;
+    if (this.type === 'dummy') base = 40;
+    else if (this.type === 'drone') base = 60;
+    else if (this.type === 'elite') base = 500;
+    else if (this.type === 'boss') base = 6000;
+    return Math.floor(base * (1 + 0.5 * (this.level - 1)));
+  }
+
   die() {
+    if (this.dead) return;
     this.dead = true;
 
     // Cinematic death burst (distinct size per enemy class)
@@ -424,6 +566,13 @@ export class Enemy {
       }
     }
 
+    // Kill reward: XP (scales with enemy level) + floating text
+    const xp = this.getXpReward();
+    if (this.manager && xp > 0) {
+      this.manager.onKill(this);
+      this.spawnFloatingText(`+${xp} XP`, 'xp');
+    }
+
     this.scene.remove(this.mesh);
   }
 
@@ -437,9 +586,7 @@ export class Enemy {
     if (this.status.frozen > 0) this.status.frozen -= dt;
     if (this.status.imprisoned > 0) {
       this.status.imprisoned -= dt;
-      if (this.status.imprisoned <= 0) {
-        this.showLaserCage(false);
-      }
+      if (this.status.imprisoned <= 0) this.showLaserCage(false);
     }
     if (this.status.blinded > 0) this.status.blinded -= dt;
 
@@ -449,7 +596,7 @@ export class Enemy {
       this.status.burnTickTimer += dt;
       if (this.status.burnTickTimer >= 0.5) {
         this.status.burnTickTimer = 0;
-        this.takeDamage(this.maxHp * 0.035, false, 'burn');
+        this.takeDamage(this.maxHp * 0.035, false, 'status');
         if (this.dead) return;
       }
     }
@@ -460,25 +607,48 @@ export class Enemy {
       this.knockback.multiplyScalar(Math.max(0, 1.0 - 4.5 * dt));
     }
 
-    // ---- Per-type idle / locomotion animation ----
+    // ---- Per-type animation ----
     if (this.type === 'drone' && this.bodyGroup) {
       const frozen = this.status.frozen > 0;
       const bobSpeed = frozen ? 0.4 : 2.4;
       this.bodyGroup.position.y = Math.sin(this.animTime * bobSpeed) * 0.25;
-      if (this.droneRing) {
-        const spin = this.status.stunned > 0 ? 14 : 1.6;
-        this.droneRing.rotation.z += dt * spin;
+
+      // Face the player + bank into the turn
+      if (!frozen) {
+        const toPlayer = new THREE.Vector3().subVectors(player.position, this.mesh.position);
+        const targetYaw = Math.atan2(toPlayer.x, toPlayer.z);
+        let dy = targetYaw - this.mesh.rotation.y;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        this.mesh.rotation.y += dy * Math.min(1, dt * 4);
+        this.bodyGroup.rotation.z = -dy * 0.6; // banking tilt
+        this.bodyGroup.rotation.x = dy * 0.3;
       }
+
+      // Rotors spin fast (frozen = crawl)
+      const spinSpeed = frozen ? 2 : 40;
+      for (let i = 0; i < this.rotors.length; i += 2) {
+        this.rotors[i].rotation.y += dt * spinSpeed;
+        if (this.rotors[i + 1]) this.rotors[i + 1].rotation.z += dt * spinSpeed * 1.4;
+      }
+
+      // Blinking nav lights
+      const blink = Math.sin(this.animTime * 6) > 0.4;
+      for (const m of this.navLights) {
+        m.color.setHex(blink ? 0xff3344 : 0x551111);
+      }
+
       if (this.droneGlowMat) {
-        this.droneGlowMat.opacity = frozen ? 0.2 : 0.4 + 0.2 * Math.sin(this.animTime * 6);
+        this.droneGlowMat.opacity = frozen ? 0.15 : 0.35 + 0.2 * Math.sin(this.animTime * 6);
       }
     } else if (this.type === 'elite' && this.eliteLegs) {
+      // Two-segment walk cycle
       for (let i = 0; i < this.eliteLegs.length; i++) {
-        this.eliteLegs[i].rotation.x = Math.sin(this.animTime * 3.2 + i * Math.PI) * 0.28;
+        const phase = this.animTime * 3.2 + i * Math.PI;
+        this.eliteLegs[i].rotation.x = Math.sin(phase) * 0.32;
       }
-      if (this.eliteCoreMat) {
-        this.eliteCoreMat.color.multiplyScalar(1.0); // keep
-      }
+      // Idle sway
+      this.bodyGroup.position.y = Math.abs(Math.sin(this.animTime * 3.2)) * 0.12;
     } else if (this.type === 'boss' && this.bodyGroup) {
       const pulse = 1 + Math.sin(this.animTime * 2.2) * 0.12;
       if (this.bossReactor) this.bossReactor.scale.setScalar(pulse);
@@ -486,10 +656,14 @@ export class Enemy {
         this.bossCage.rotation.y += dt * 0.8;
         this.bossCage.rotation.x += dt * 0.3;
       }
+      if (this.bossRing) {
+        this.bossRing.rotation.z += dt * 0.5;
+        this.bossRing.rotation.x = Math.PI / 2.4 + Math.sin(this.animTime * 0.6) * 0.15;
+      }
       if (this.bossGlowMat) {
         this.bossGlowMat.opacity = 0.4 + 0.15 * Math.sin(this.animTime * 2.2);
       }
-      this.bodyGroup.position.y = Math.sin(this.animTime * 0.9) * 0.4;
+      this.bodyGroup.position.y = Math.sin(this.animTime * 0.9) * 0.5 + 0.4;
     }
 
     // Is enemy unable to move/act?
@@ -527,7 +701,7 @@ export class Enemy {
       if (this.attackCooldown >= 1.5) {
         this.attackCooldown = 0;
         if (this.status.hacked) {
-          // SPECIFICATION: Hacked target attacks heal the player instead of damaging!
+          // Hacked targets heal the player instead of damaging!
           player.heal(50);
         } else {
           player.takeDamage(this.type === 'boss' ? 120 : (this.type === 'elite' ? 50 : 20));
@@ -538,14 +712,41 @@ export class Enemy {
 }
 
 export class EnemyManager {
-  constructor(scene, explosionManager = null) {
+  constructor(scene, explosionManager = null, engine = null) {
     this.scene = scene;
     this.enemies = [];
     this.autoRespawn = true;
     this.explosionManager = explosionManager;
+    this.engine = engine;
+
+    // World level: rises as you rack up kills -> enemies get tougher
+    // and their XP rewards grow (+50% of base per level above 1)
+    this.worldLevel = 1;
+    this.totalKills = 0;
+
+    // Kill hook -> XP flow
+    this.onKill = (enemy) => {
+      this.totalKills++;
+      if (this.totalKills % 15 === 0) {
+        this.worldLevel++;
+      }
+      if (this.engine && this.engine.player) {
+        const gained = this.engine.player.gainXp(enemy.getXpReward());
+        if (gained > 0 && this.engine.onPlayerLevelUp) {
+          this.engine.onPlayerLevelUp(gained, this.engine.player.level);
+        }
+      }
+    };
 
     // Spawn initial setup
     this.spawnInitialWave();
+  }
+
+  _spawn(type, pos) {
+    const e = new Enemy(this.scene, type, pos, this.explosionManager, this.worldLevel);
+    e.manager = this;
+    this.enemies.push(e);
+    return e;
   }
 
   spawnInitialWave() {
@@ -556,24 +757,33 @@ export class EnemyManager {
   }
 
   spawnDummy(pos = new THREE.Vector3(0, 0, 15)) {
-    this.enemies.push(new Enemy(this.scene, 'dummy', pos, this.explosionManager));
+    this._spawn('dummy', pos);
   }
 
   spawnDronePack(count = 5, spread = 45) {
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2 + Math.random();
       const dist = 25 + Math.random() * spread;
-      const pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-      this.enemies.push(new Enemy(this.scene, 'drone', pos, this.explosionManager));
+      this._spawn('drone', new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist));
     }
   }
 
   spawnElite(pos = new THREE.Vector3(-25, 0, 30)) {
-    this.enemies.push(new Enemy(this.scene, 'elite', pos, this.explosionManager));
+    this._spawn('elite', pos);
   }
 
   spawnBoss(pos = new THREE.Vector3(0, 0, 75)) {
-    this.enemies.push(new Enemy(this.scene, 'boss', pos, this.explosionManager));
+    this._spawn('boss', pos);
+  }
+
+  /** Flat damage bonus for the given attack source (from player stats). */
+  getDamageBonus(source) {
+    if (!this.engine || !this.engine.player) return 0;
+    const p = this.engine.player;
+    if (source === 'fruit') return p.fruitDamageBonus || 0;
+    if (source === 'sword') return p.swordDamageBonus || 0;
+    if (source === 'gun') return p.gunDamageBonus || 0;
+    return 0;
   }
 
   clearAll() {
@@ -617,7 +827,7 @@ export class EnemyManager {
   }
 
   /**
-   * Find enemy with highest current HP (for Alarm Fruit skill 2: automatic transmission alarming)
+   * Find enemy with highest current HP (for Alarm Fruit skill 2)
    */
   findHighestHpEnemy(pos, maxRadius = 300) {
     let highest = null;

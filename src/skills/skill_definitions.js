@@ -54,7 +54,7 @@ export const SKILL_DATABASE = {
               // Damage & Firepit
               const enemies = ctx.enemies.getEnemiesInRadius(target, 25.0);
               for (const e of enemies) {
-                e.takeDamage(1200, false);
+                e.takeDamage(1200, false, 'fruit');
                 e.applyStatus('burn', 10.0);
               }
 
@@ -91,12 +91,16 @@ export const SKILL_DATABASE = {
             e.applyKnockback(new THREE.Vector3().subVectors(center, e.mesh.position), 35.0);
           }
 
+          // ONE-PIECE CINEMATIC: colossal gravity vortex sucking the arena in
+          ctx.explosions.vortex(new THREE.Vector3(0, 0, 0), 0xb026ff, 30.0, 2.0);
+
           // Delay explosion at center
           setTimeout(() => {
             ctx.explosions.createExplosion(center, blastRadius, 'asteroid', 3.2);
+            ctx.explosions.megaShockwave(new THREE.Vector3(0, 0, 0), Math.max(80, blastRadius * 1.6), 0xb026ff);
             for (const e of allEnemies) {
               const baseDmg = 900 * bonusPercent;
-              e.takeDamage(baseDmg, true);
+              e.takeDamage(baseDmg, true, 'fruit');
             }
           }, 650);
         }
@@ -149,7 +153,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(strikeTarget, 8.0);
             for (const e of hitEnemies) {
-              e.takeDamage(420, false);
+              e.takeDamage(420, false, 'fruit');
             }
 
             // 12% chance to drop 1-5 small meteors
@@ -184,7 +188,7 @@ export const SKILL_DATABASE = {
               }
               const p = target.mesh.position.clone();
               ctx.explosions.createExplosion(p, 12.0, 'asteroid', 1.6);
-              target.takeDamage(650, false);
+              target.takeDamage(650, false, 'fruit');
             }, 500);
           }
         }
@@ -213,7 +217,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(dropPos, 25.0, 'asteroid', 2.6);
             const enemies = ctx.enemies.getEnemiesInRadius(dropPos, 25.0);
             for (const e of enemies) {
-              e.takeDamage(1400, false);
+              e.takeDamage(1400, false, 'fruit');
               e.applyStatus('burn', 10.0);
             }
             ctx.spawnFirepit(dropPos, 25.0, 10.0, 0.05);
@@ -242,7 +246,7 @@ export const SKILL_DATABASE = {
           const hitEnemies = ctx.enemies.getEnemiesInRadius(punchPos, 14.0);
           for (const e of hitEnemies) {
             e.applyKnockback(forward, 10.0);
-            e.takeDamage(1800, true);
+            e.takeDamage(1800, true, 'fruit');
           }
 
           // Strikes 4 rows of 4 overlapped purple lightning bolts (strike burst interval 0.5s)
@@ -290,6 +294,10 @@ export const SKILL_DATABASE = {
 
           setTimeout(() => {
             const target = ctx.player.aimTarget.clone();
+            // ONE-PIECE CINEMATIC: purple gravity-beam lancing from the blade
+            const from = ctx.player.position.clone();
+            from.y = 1.8;
+            ctx.explosions.beam(from, target.clone().add(new THREE.Vector3(0, 1.2, 0)), 2.4, 0xcc44ff);
             ctx.lightning.strikeOverlapped(target, 6, 4.0, 110, '#cc44ff');
             ctx.explosions.createExplosion(target, 16.0, 'lightning', 2.8);
 
@@ -299,14 +307,14 @@ export const SKILL_DATABASE = {
               e.applyStatus('blind', 10.0);
 
               if (e.type === 'elite' || e.type === 'boss') {
-                e.takeDamage(e.maxHp * 0.5, true);
+                e.takeDamage(e.maxHp * 0.5, true, 'sword');
               } else {
                 // Instant kill chance based on sword charge
                 const isMax = ctx.player.gravityBladeCharge >= 100;
                 if (isMax && Math.random() < 0.42) {
-                  e.takeDamage(e.maxHp * 20.0, true);
+                  e.takeDamage(e.maxHp * 20.0, true, 'sword');
                 } else {
-                  e.takeDamage(e.maxHp, true); // Instant kill normal enemy
+                  e.takeDamage(e.maxHp, true, 'sword'); // Instant kill normal enemy
                 }
               }
             }
@@ -340,7 +348,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 12.0);
             for (const e of hitEnemies) {
-              e.takeDamage(380, false);
+              e.takeDamage(380, false, 'sword');
             }
           }, 60);
         }
@@ -367,7 +375,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(strikePos, 24.0, 'quake', 2.4);
             const hitEnemies = ctx.enemies.getEnemiesInRadius(strikePos, 24.0);
             for (const e of hitEnemies) {
-              e.takeDamage(750, false);
+              e.takeDamage(750, false, 'sword');
             }
           }, 150);
         }
@@ -400,7 +408,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(hitPos, radius, 'asteroid', shake);
 
             if (target && !target.dead) {
-              target.takeDamage(dmg, true);
+              target.takeDamage(dmg, true, 'sword');
               target.applyStatus('stun', 1.5);
               target.applyStatus('burn', 10.0);
             }
@@ -425,7 +433,7 @@ export const SKILL_DATABASE = {
             // Slashes follow player position
             const hitEnemies = ctx.enemies.getEnemiesInRadius(ctx.player.position, 50.0);
             for (const e of hitEnemies) {
-              e.takeDamage(120, false);
+              e.takeDamage(120, false, 'sword');
               e.applyStatus('bleed', 5.0);
             }
             ctx.cameraController.addShake(ctx.player.position, 0.4, 0.05);
@@ -482,7 +490,7 @@ export const SKILL_DATABASE = {
 
               const enemies = ctx.enemies.getEnemiesInRadius(targetPos, 30.0);
               for (const e of enemies) {
-                e.takeDamage(1600, false);
+                e.takeDamage(1600, false, 'fruit');
                 e.applyStatus('stun', 1.5);
               }
             } else {
@@ -515,7 +523,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 4.5);
             for (const e of hitEnemies) {
-              e.takeDamage(550, false);
+              e.takeDamage(550, false, 'fruit');
             }
           }, 220);
         }
@@ -538,7 +546,7 @@ export const SKILL_DATABASE = {
           for (const e of enemies) {
             e.applyStatus('stun', 3.0);
             e.applyKnockback(new THREE.Vector3(0, 1, 0), 20.0); // Lift up into air
-            e.takeDamage(1400, true);
+            e.takeDamage(1400, true, 'fruit');
           }
         }
       },
@@ -577,6 +585,10 @@ export const SKILL_DATABASE = {
               // Big initial explosion
               ctx.explosions.createExplosion(target, 25.0, 'lightning', 3.5);
 
+              // ONE-PIECE CINEMATIC: black-hole suction vortex + shockwave
+              ctx.explosions.vortex(target, 0x33aaff, 22.0, 5.0);
+              ctx.explosions.megaShockwave(target, 70.0, 0x00d4ff);
+
               // Expanding continuous explosion at 15 m/s for 5 seconds
               let expandTime = 0;
               const expandTimer = setInterval(() => {
@@ -590,7 +602,7 @@ export const SKILL_DATABASE = {
 
                 const hitEnemies = ctx.enemies.getEnemiesInRadius(target, currentRadius);
                 for (const e of hitEnemies) {
-                  e.takeDamage(600 * 0.25, false);
+                  e.takeDamage(600 * 0.25, false, 'fruit');
                 }
               }, 250);
             } else {
@@ -619,7 +631,7 @@ export const SKILL_DATABASE = {
 
           const hitEnemies = ctx.enemies.getEnemiesInRadius(ctx.player.position, 6.0);
           for (const e of hitEnemies) {
-            e.takeDamage(850, false);
+            e.takeDamage(850, false, 'fruit');
             e.applyStatus('stun', 0.8);
           }
         }
@@ -653,7 +665,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 16.0);
             for (const e of hitEnemies) {
-              e.takeDamage(750, false);
+              e.takeDamage(750, false, 'fruit');
               e.applyStatus('stun', 3.0);
             }
           }, 100);
@@ -687,7 +699,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(targetPos, 2.0, 'lightning', 1.0);
             const enemies = ctx.enemies.getEnemiesInRadius(targetPos, 3.5);
             for (const e of enemies) {
-              e.takeDamage(600, false);
+              e.takeDamage(600, false, 'sword');
             }
           }, 1000);
         }
@@ -729,7 +741,7 @@ export const SKILL_DATABASE = {
             for (const e of suckEnemies) {
               const pullDir = new THREE.Vector3().subVectors(hitPos, e.mesh.position).normalize();
               e.applyKnockback(pullDir, 12.0);
-              e.takeDamage(320, false);
+              e.takeDamage(320, false, 'sword');
             }
           }, 100);
         }
@@ -762,7 +774,7 @@ export const SKILL_DATABASE = {
 
           setTimeout(() => {
             ctx.explosions.createExplosion(closest.enemy.mesh.position, 15.0, 'quake', 3.4);
-            closest.enemy.takeDamage(2400, true);
+            closest.enemy.takeDamage(2400, true, 'fruit');
             const knockDir = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), ctx.player.group.rotation.y);
             closest.enemy.applyKnockback(knockDir, 45.0);
           }, 1000);
@@ -785,7 +797,7 @@ export const SKILL_DATABASE = {
           ctx.explosions.createExplosion(orbTarget, 16.0, 'quake', 2.0);
           const enemies = ctx.enemies.getEnemiesInRadius(orbTarget, 16.0);
           for (const e of enemies) {
-            e.takeDamage(1200, false);
+            e.takeDamage(1200, false, 'fruit');
             e.applyStatus('stun', 2.0);
           }
         }
@@ -809,9 +821,12 @@ export const SKILL_DATABASE = {
 
           ctx.explosions.createExplosion(smashPos, 28.0, 'quake', 3.5);
 
+          // ONE-PIECE CINEMATIC: colossal triple shockwave racing outward
+          ctx.explosions.megaShockwave(smashPos, 60.0, 0x00bfff);
+
           const enemies = ctx.enemies.getEnemiesInRadius(smashPos, 28.0);
           for (const e of enemies) {
-            e.takeDamage(1800, true);
+            e.takeDamage(1800, true, 'fruit');
             e.applyStatus('stun', 5.0);
             const knockDir = new THREE.Vector3().subVectors(e.mesh.position, smashPos).normalize();
             e.applyKnockback(knockDir, 10.0);
@@ -840,6 +855,9 @@ export const SKILL_DATABASE = {
             const r = count * 20.0;
             ctx.explosions.createExplosion(p, r, 'quake', 2.0);
           }, 200);
+
+          // ONE-PIECE CINEMATIC: giant shockwave rings as the tsunamis erupt
+          ctx.explosions.megaShockwave(p, 110.0, 0x66ccff);
 
           // Spawn 16 tsunamis (6 large, 10 small) from 4 directions
           const dirs = [
@@ -892,7 +910,7 @@ export const SKILL_DATABASE = {
 
           const enemies = ctx.enemies.getEnemiesInRadius(p, 18.0);
           for (const e of enemies) {
-            e.takeDamage(950, false);
+            e.takeDamage(950, false, 'sword');
             e.applyStatus('stun', 2.5);
             const knockDir = new THREE.Vector3().subVectors(e.mesh.position, p).normalize();
             e.applyKnockback(knockDir, 28.0);
@@ -916,7 +934,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(hitPos, 6.0, 'quake', 1.0);
             const enemies = ctx.enemies.getEnemiesInRadius(hitPos, 6.0);
             for (const e of enemies) {
-              e.takeDamage(550, false);
+              e.takeDamage(550, false, 'sword');
             }
           }
         }
@@ -962,7 +980,7 @@ export const SKILL_DATABASE = {
           const enemies = ctx.enemies.getEnemiesInRadius(ctx.player.position, 80.0);
           for (const e of enemies) {
             e.applyStatus('imprison', 6.0);
-            e.takeDamage(750, false);
+            e.takeDamage(750, false, 'fruit');
           }
         }
       },
@@ -979,7 +997,7 @@ export const SKILL_DATABASE = {
 
           ctx.sound.playLaser(0.8);
           highest.applyStatus('imprison', 15.0);
-          highest.takeDamage(2200, true);
+          highest.takeDamage(2200, true, 'fruit');
 
           // Tall red beam down
           ctx.lightning.strikeBolt(highest.mesh.position, 120, '#ff0044', 0.6, 24);
@@ -1010,8 +1028,12 @@ export const SKILL_DATABASE = {
               // Move away from player
               const awayDir = new THREE.Vector3().subVectors(e.mesh.position, ctx.player.position).normalize();
               e.applyKnockback(awayDir, 16.0);
-              e.takeDamage(350, false);
+              e.takeDamage(350, false, 'fruit');
               ctx.lightning.strikeBolt(e.mesh.position, 60, '#ff0044', 0.2, 16);
+              // ONE-PIECE CINEMATIC: crimson siren beam from operative to target
+              const from = ctx.player.position.clone();
+              from.y = 1.6;
+              ctx.explosions.beam(from, e.mesh.position.clone().add(new THREE.Vector3(0, 1.4, 0)), 0.7, 0xff0044);
             }
           }, 1000);
         }
@@ -1090,7 +1112,7 @@ export const SKILL_DATABASE = {
 
           const enemies = ctx.enemies.getEnemiesInRadius(p, 40.0);
           for (const e of enemies) {
-            e.takeDamage(2200, true);
+            e.takeDamage(2200, true, 'sword');
             e.applyKnockback(new THREE.Vector3(0, 1, 0), 50.0); // Fly up 50 meters
           }
         }
@@ -1131,7 +1153,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 45.0);
             for (const e of hitEnemies) {
-              e.takeDamage(650, false);
+              e.takeDamage(650, false, 'fruit');
               e.applyStatus('freeze', 3.0);
             }
           }, 130);
@@ -1172,11 +1194,15 @@ export const SKILL_DATABASE = {
             // 5000m arena-wide explosion
             ctx.explosions.createExplosion(ctx.player.position, 120.0, 'ice', 6.0);
 
+            // ONE-PIECE CINEMATIC: blizzard shockwave racing across the arena
+            ctx.explosions.megaShockwave(ctx.player.position, 160.0, 0x9ff4ff);
+            ctx.explosions.vortex(ctx.player.position, 0xbfefff, 20.0, 4.0);
+
             // Freeze all enemies for 10 seconds & continuous damage
             const enemies = ctx.enemies.enemies;
             for (const e of enemies) {
               e.applyStatus('freeze', 10.0);
-              e.takeDamage(4500, true);
+              e.takeDamage(4500, true, 'fruit');
             }
           }, 500);
         }
@@ -1217,7 +1243,7 @@ export const SKILL_DATABASE = {
             ctx.explosions.createExplosion(hitPos, 30.0, 'fire', 1.2);
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 30.0);
             for (const e of hitEnemies) {
-              e.takeDamage(120, false);
+              e.takeDamage(120, false, 'fruit');
               e.applyStatus('burn', 3.0);
             }
             ctx.spawnFirepit(hitPos, 10.0, 6.0, 0.02);
@@ -1235,6 +1261,9 @@ export const SKILL_DATABASE = {
           ctx.player.buffs.hellFury.active = true;
           ctx.player.buffs.hellFury.timer = 10.0;
           ctx.sound.playExplosion(0.8);
+          // ONE-PIECE CINEMATIC: hellfire shockwave erupting from the operative
+          ctx.explosions.megaShockwave(ctx.player.position, 80.0, 0xff4400);
+          ctx.explosions.vortex(ctx.player.position, 0xff7722, 12.0, 6.0);
         }
       },
       {
@@ -1263,7 +1292,7 @@ export const SKILL_DATABASE = {
 
             const hitEnemies = ctx.enemies.getEnemiesInRadius(hitPos, 50.0);
             for (const e of hitEnemies) {
-              e.takeDamage(620, false);
+              e.takeDamage(620, false, 'fruit');
               e.applyStatus('burn', 3.0);
             }
             ctx.spawnFirepit(hitPos, 16.0, 10.0, 0.04);
@@ -1344,6 +1373,8 @@ export const SKILL_DATABASE = {
         desc: 'Big supercell cloud swirls underbase to produce a 200 mph tornado that sucks enemies in and damages continuously for 10s.',
         cast: (ctx) => {
           ctx.weather.createTornado(ctx.player.aimTarget, 8, 160, 200, 10.0);
+          // ONE-PIECE CINEMATIC: visible swirling suction vortex
+          ctx.explosions.vortex(ctx.player.aimTarget, 0x99ccff, 14.0, 9.5);
         }
       },
       {
@@ -1361,6 +1392,9 @@ export const SKILL_DATABASE = {
             ctx.cameraController.addShake(ctx.player.position, 5.0, 5.0);
             ctx.weather.createRainshaft(ctx.player.position, 280, 220, 800);
             ctx.weather.createTornado(ctx.player.position.clone().add(new THREE.Vector3(30, 0, 30)), 12, 180, 350, 15.0);
+            // ONE-PIECE CINEMATIC: colossal eyewall suction vortex
+            ctx.explosions.vortex(ctx.player.position.clone().add(new THREE.Vector3(30, 0, 30)), 0x88bbee, 30.0, 14.0);
+            ctx.explosions.megaShockwave(ctx.player.position, 150.0, 0x66aaff);
           }, 1000);
         }
       },

@@ -204,7 +204,7 @@ export class SkillBarUI {
   tryCastSkill(skill) {
     const cd = this.cooldowns.get(skill.id);
     if (cd && cd.current > 0) {
-      this.game.sound.playUiBeep(350);
+      this.game.sound.playUiDeny();
       return; // On Cooldown
     }
 
@@ -215,6 +215,21 @@ export class SkillBarUI {
     }
 
     this.cooldowns.set(skill.id, { current: baseTime, total: baseTime });
+
+    // =========================================================
+    // ONE-PIECE-STYLE CAST PRESENTATION (every single cast)
+    //  - Big anime move-name banner across the screen
+    //  - Powerful cast whoosh sound
+    //  - Energy aura shell erupting from the caster
+    // =========================================================
+    const parentColorHex = (SKILL_DATABASE[this.activeType] && SKILL_DATABASE[this.activeType].color) || '#00f0ff';
+    this.game.showSkillBanner(skill.name, parentColorHex);
+    this.game.sound.playSkillCast(this.activeSource === 'sword' ? 0.85 : 1.0);
+    this.game.explosions.auraBurst(
+      this.game.player.position.clone(),
+      parseInt(parentColorHex.slice(1), 16),
+      9.0
+    );
 
     // Execute cast logic
     try {

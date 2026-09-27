@@ -42,23 +42,33 @@ export class SettingsModal {
     this.initEvents();
   }
 
+  open() {
+    if (this.modal) {
+      this.modal.style.display = 'flex';
+      this.game.sound.playUiOpen();
+    }
+  }
+
+  close() {
+    if (this.modal) {
+      this.modal.style.display = 'none';
+      this.game.sound.playUiClose();
+    }
+  }
+
   initEvents() {
     if (this.openBtn) {
-      this.openBtn.addEventListener('click', () => {
-        this.modal.style.display = 'flex';
-      });
+      this.openBtn.addEventListener('click', () => this.open());
     }
 
     if (this.closeBtn) {
-      this.closeBtn.addEventListener('click', () => {
-        this.modal.style.display = 'none';
-      });
+      this.closeBtn.addEventListener('click', () => this.close());
     }
 
     if (this.applyBtn) {
       this.applyBtn.addEventListener('click', () => {
         this.applySettings();
-        this.modal.style.display = 'none';
+        this.close();
         this.game.sound.playUiBeep(1000);
       });
     }
@@ -66,9 +76,7 @@ export class SettingsModal {
     // Modal backdrop click
     if (this.modal) {
       this.modal.addEventListener('click', (e) => {
-        if (e.target === this.modal) {
-          this.modal.style.display = 'none';
-        }
+        if (e.target === this.modal) this.close();
       });
     }
 

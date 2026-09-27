@@ -317,6 +317,94 @@ export class ExplosionManager {
       scene.add(mesh);
       this.blastWalls.push({ mesh, mat, active: false, elapsed: 0, duration: 0.5, maxR: 10, height: 8 });
     }
+
+    // ---------------------------------------------------------------
+    // ONE-PIECE-STYLE CINEMATIC SKILL VISUALS (all pooled)
+    // ---------------------------------------------------------------
+
+    // AURA BURST: expanding energy shell + ring + sparks around the caster
+    this.auraBursts = [];
+    const auraGeo = new THREE.IcosahedronGeometry(1, 1);
+    for (let i = 0; i < 6; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0, wireframe: true,
+        depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(auraGeo, mat);
+      mesh.visible = false;
+      scene.add(mesh);
+      this.auraBursts.push({ mesh, mat, active: false, elapsed: 0, duration: 0.5, maxR: 8 });
+    }
+
+    // VORTEX: swirling spiral particle column + rotating energy rings
+    this.vortices = [];
+    for (let i = 0; i < 4; i++) {
+      const count = 160;
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(count * 3);
+      const seeds = new Float32Array(count * 2); // angle, radius-factor
+      for (let j = 0; j < count; j++) {
+        seeds[j * 2] = Math.random() * Math.PI * 2;
+        seeds[j * 2 + 1] = Math.pow(Math.random(), 0.7);
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.PointsMaterial({
+        color: 0xffffff, size: 1.4, map: this.emberTex, transparent: true,
+        opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const pts = new THREE.Points(geo, mat);
+      pts.frustumCulled = false;
+      pts.visible = false;
+      scene.add(pts);
+
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.5,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(1, 0.06, 8, 40), ringMat);
+      ring.visible = false;
+      scene.add(ring);
+
+      this.vortices.push({ pts, mat, ring, ringMat, seeds, count, active: false, elapsed: 0, duration: 3.0, radius: 12 });
+    }
+
+    // MEGA SHOCKWAVE: three staggered ground rings expanding to huge radius
+    this.megaWaves = [];
+    for (let i = 0; i < 5; i++) {
+      const set = [];
+      for (let r = 0; r < 3; r++) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xffffff, transparent: true, opacity: 0,
+          side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+        });
+        const mesh = new THREE.Mesh(this.groundRingGeoClone(), mat);
+        mesh.visible = false;
+        scene.add(mesh);
+        set.push({ mesh, mat, delay: r * 0.14 });
+      }
+      this.megaWaves.push({ set, active: false, elapsed: 0, duration: 1.1, maxR: 60 });
+    }
+
+    // BEAM: thick bright energy beam between two points (huge attacks)
+    this.beams = [];
+    const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true);
+    beamGeo.rotateX(Math.PI / 2); // axis along Z for lookAt
+    for (let i = 0; i < 6; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(beamGeo, mat);
+      mesh.visible = false;
+      scene.add(mesh);
+      this.beams.push({ mesh, mat, active: false, elapsed: 0, duration: 0.3, radius: 2 });
+    }
+  }
+
+  groundRingGeoClone() {
+    const g = new THREE.RingGeometry(0.88, 1.0, 48);
+    g.rotateX(-Math.PI / 2);
+    return g;
   }
 
   setDebrisCount(count) {
@@ -360,6 +448,83 @@ export class ExplosionManager {
     w.mesh.position.set(pos.x, w.height * 0.5 + 0.2, pos.z);
     w.mat.color.set(colorHex);
     w.mesh.visible = true;
+  }
+
+  /**
+   * ONE-PIECE STYLE: energy aura shell that erupts around the caster
+   * on skill use (expanding wireframe icosahedron + ring + sparks).
+   */
+  auraBurst(pos, colorHex, radius = 10.0) {
+    const a = this.auraBursts.find(x => !x.active) || this.auraBursts[0];
+    a.active = true;
+    a.elapsed = 0;
+    a.duration = 0.45;
+    a.maxR = radius;
+    a.mesh.position.copy(pos);
+    a.mesh.position.y += 1.3;
+    a.mat.color.set(colorHex);
+    a.mesh.visible = true;
+    this._spawnEmbers(pos, colorHex, radius * 0.7);
+    this._blastWall(pos, radius * 0.8, colorHex);
+    this._markImpact(pos, radius * 0.5, false);
+  }
+
+  /**
+   * ONE-PIECE STYLE: swirling suction vortex column (spiral particles
+   * + rotating energy ring) used by gravity / suction / storm skills.
+   */
+  vortex(pos, colorHex, radius = 12.0, duration = 3.0) {
+    const v = this.vortices.find(x => !x.active) || this.vortices[0];
+    v.active = true;
+    v.elapsed = 0;
+    v.duration = duration;
+    v.radius = radius;
+    v.pts.position.set(pos.x, 0.3, pos.z);
+    v.pts.visible = true;
+    v.mat.color.set(colorHex);
+    v.ring.position.set(pos.x, 0.6, pos.z);
+    v.ring.rotation.x = Math.PI / 2;
+    v.ringMat.color.set(colorHex);
+    v.ring.visible = true;
+    return v;
+  }
+
+  /**
+   * ONE-PIECE STYLE: colossal triple staggered shockwave rings that
+   * race across the battlefield (cataclysm finishers).
+   */
+  megaShockwave(pos, radius = 60.0, colorHex = 0xffffff) {
+    const w = this.megaWaves.find(x => !x.active) || this.megaWaves[0];
+    w.active = true;
+    w.elapsed = 0;
+    w.duration = 1.1 + radius * 0.012;
+    w.maxR = radius;
+    for (const r of w.set) {
+      r.mesh.position.set(pos.x, 0.4, pos.z);
+      r.mat.color.set(colorHex);
+      r.mesh.visible = true;
+      r.mat.opacity = 0;
+    }
+    this._blastWall(pos, radius * 0.7, colorHex);
+  }
+
+  /**
+   * ONE-PIECE STYLE: thick cinematic energy beam between two points.
+   */
+  beam(from, to, radius = 2.0, colorHex = 0xffffff) {
+    const b = this.beams.find(x => !x.active) || this.beams[0];
+    b.active = true;
+    b.elapsed = 0;
+    b.duration = 0.32;
+    b.radius = radius;
+    const mid = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
+    b.mesh.position.copy(mid);
+    b.mesh.lookAt(to);
+    const len = from.distanceTo(to);
+    b.mesh.scale.set(radius, radius, len);
+    b.mat.color.set(colorHex);
+    b.mesh.visible = true;
+    this._spawnFlashLight(mid, colorHex, radius * 2.0, 0.3);
   }
 
   _spawnFlashLight(pos, colorHex, radius, duration = 0.55) {
@@ -733,6 +898,99 @@ export class ExplosionManager {
       const r = Math.max(0.001, w.maxR * ease);
       w.mesh.scale.set(r, w.height * (1.0 - t * 0.55), r);
       w.mat.opacity = (1.0 - t) * 0.3;
+    }
+
+    // Cinematic aura bursts (skill cast shells)
+    for (const a of this.auraBursts) {
+      if (!a.active) continue;
+      a.elapsed += dt;
+      const t = a.elapsed / a.duration;
+      if (t >= 1.0) {
+        a.active = false;
+        a.mesh.visible = false;
+        continue;
+      }
+      const ease = 1.0 - Math.pow(1.0 - t, 2.6);
+      a.mesh.scale.setScalar(Math.max(0.001, a.maxR * ease));
+      a.mesh.rotation.y += dt * 3.0;
+      a.mesh.rotation.x += dt * 1.4;
+      a.mat.opacity = (1.0 - t) * 0.85;
+    }
+
+    // Cinematic vortices (spiral suction columns)
+    for (const v of this.vortices) {
+      if (!v.active) continue;
+      v.elapsed += dt;
+      const t = v.elapsed / v.duration;
+      if (t >= 1.0) {
+        v.active = false;
+        v.pts.visible = false;
+        v.ring.visible = false;
+        continue;
+      }
+      const fadeIn = Math.min(1, t * 5);
+      const fadeOut = Math.min(1, (1 - t) * 4);
+      v.mat.opacity = 0.9 * fadeIn * fadeOut;
+      v.ringMat.opacity = 0.55 * fadeIn * fadeOut;
+
+      const posAttr = v.pts.geometry.attributes.position;
+      const arr = posAttr.array;
+      const spin = t * 14.0;
+      const pullIn = 1.0 - t * 0.75; // spirals tighten as it matures
+      const height = 26.0 * (0.6 + 0.4 * fadeIn);
+      for (let j = 0; j < v.count; j++) {
+        const angle = v.seeds[j * 2] + spin * (1.2 + v.seeds[j * 2 + 1] * 0.8);
+        const rf = v.seeds[j * 2 + 1];
+        const hNorm = (v.seeds[j * 2] * 0.159 + t * 1.7) % 1.0; // rising particles
+        const r = v.radius * rf * pullIn * (0.35 + 0.65 * hNorm);
+        arr[j * 3 + 0] = Math.cos(angle) * r;
+        arr[j * 3 + 1] = hNorm * height;
+        arr[j * 3 + 2] = Math.sin(angle) * r;
+      }
+      posAttr.needsUpdate = true;
+
+      const rr = v.radius * (0.7 + 0.3 * Math.sin(v.elapsed * 5.0)) * pullIn;
+      v.ring.scale.setScalar(Math.max(0.001, rr));
+      v.ring.rotation.z += dt * 4.0;
+    }
+
+    // Colossal staggered shockwaves
+    for (const w of this.megaWaves) {
+      if (!w.active) continue;
+      w.elapsed += dt;
+      let allDone = true;
+      for (const r of w.set) {
+        const lt = (w.elapsed - r.delay) / (w.duration - r.delay);
+        if (lt < 0) { allDone = false; continue; }
+        if (lt >= 1.0) {
+          r.mesh.visible = false;
+          continue;
+        }
+        allDone = false;
+        const ease = 1.0 - Math.pow(1.0 - lt, 2.4);
+        const rad = Math.max(0.001, w.maxR * ease);
+        r.mesh.scale.setScalar(rad);
+        r.mat.opacity = (1.0 - lt) * 0.8;
+      }
+      if (allDone) {
+        w.active = false;
+      }
+    }
+
+    // Cinematic beams
+    for (const b of this.beams) {
+      if (!b.active) continue;
+      b.elapsed += dt;
+      const t = b.elapsed / b.duration;
+      if (t >= 1.0) {
+        b.active = false;
+        b.mesh.visible = false;
+        continue;
+      }
+      const thicken = 1.0 + Math.sin(t * Math.PI) * 0.8;
+      b.mesh.scale.x = b.radius * thicken;
+      b.mesh.scale.y = b.radius * thicken;
+      b.mat.opacity = (1.0 - t * t) * 0.9;
     }
   }
 

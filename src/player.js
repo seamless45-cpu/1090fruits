@@ -30,10 +30,27 @@ export class Player {
     this.sound = soundSystem;
 
     // Stats
+    this.baseMaxHp = 1000;
     this.maxHp = 1000;
     this.hp = 1000;
     this.maxEnergy = 100;
     this.energy = 100;
+
+    // ==========================================================
+    // LEVEL / XP / STAT POINTS (max level 100,000,000)
+    // Every kill gains XP; higher enemy levels give +50% XP each.
+    // Each stat point adds +50 to its stat value.
+    // ==========================================================
+    this.MAX_LEVEL = 100000000;
+    this.level = 1;
+    this.xp = 0;
+    this.statPoints = 0;
+    // Stat levels (points allocated)
+    this.stats = { health: 0, fruit: 0, gun: 0, sword: 0 };
+    // Derived damage bonuses (flat +50 per point)
+    this.fruitDamageBonus = 0;
+    this.gunDamageBonus = 0;
+    this.swordDamageBonus = 0;
 
     // Special gauges
     this.gravityBladeCharge = 0; // 0 - 100%
@@ -127,162 +144,258 @@ export class Player {
     this.bodyGroup = new THREE.Group();
     this.group.add(this.bodyGroup);
 
-    const armorMat = new THREE.MeshStandardMaterial({ color: 0x1b2a40, roughness: 0.32, metalness: 0.85 });
-    const armorDark = new THREE.MeshStandardMaterial({ color: 0x0e1622, roughness: 0.45, metalness: 0.75 });
-    const jointMat = new THREE.MeshStandardMaterial({ color: 0x2a3d58, roughness: 0.3, metalness: 0.9 });
+    // ============================================================
+    // REMODELLED OPERATIVE: angular bounty-hunter armor with a
+    // flowing energy cape, faceted helmet, layered chest plates,
+    // asymmetric pauldrons and a hexagonal fruit reactor.
+    // ============================================================
+    const armorMat = new THREE.MeshStandardMaterial({ color: 0x22344e, roughness: 0.3, metalness: 0.88 });
+    const armorDark = new THREE.MeshStandardMaterial({ color: 0x101a29, roughness: 0.42, metalness: 0.8 });
+    const armorAccent = new THREE.MeshStandardMaterial({ color: 0x3d5a80, roughness: 0.25, metalness: 0.92 });
+    const jointMat = new THREE.MeshStandardMaterial({ color: 0x2c4262, roughness: 0.3, metalness: 0.9 });
 
-    // ---------- Torso ----------
-    const torsoGeo = new THREE.CapsuleGeometry(0.34, 0.62, 6, 12);
-    this.torso = new THREE.Mesh(torsoGeo, armorMat);
+    // ---------- Torso: layered chest plates ----------
+    const torsoGeo = new THREE.CapsuleGeometry(0.33, 0.6, 6, 12);
+    this.torso = new THREE.Mesh(torsoGeo, armorDark);
     this.torso.position.y = 1.32;
     this.torso.castShadow = true;
     this.bodyGroup.add(this.torso);
 
-    // Chest plate
-    const chestGeo = new THREE.BoxGeometry(0.58, 0.5, 0.3);
-    const chest = new THREE.Mesh(chestGeo, armorDark);
-    chest.position.set(0, 1.46, 0.2);
+    // Main chest plate (angled chevron)
+    const chestGeo = new THREE.BoxGeometry(0.56, 0.44, 0.3);
+    const chest = new THREE.Mesh(chestGeo, armorMat);
+    chest.position.set(0, 1.44, 0.18);
+    chest.rotation.x = -0.12;
     chest.castShadow = true;
     this.bodyGroup.add(chest);
 
-    // Chest reactor (fruit colored glow)
-    this.reactorMat = new THREE.MeshBasicMaterial({ color: 0xb026ff, fog: false });
-    this.reactor = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.06, 16), this.reactorMat);
-    this.reactor.rotation.x = Math.PI / 2;
-    this.reactor.position.set(0, 1.48, 0.38);
-    this.bodyGroup.add(this.reactor);
+    // Upper breast plate (chevron step)
+    const upperGeo = new THREE.BoxGeometry(0.42, 0.2, 0.26);
+    const upper = new THREE.Mesh(upperGeo, armorAccent);
+    upper.position.set(0, 1.66, 0.16);
+    upper.rotation.x = -0.25;
+    upper.castShadow = true;
+    this.bodyGroup.add(upper);
 
-    // Pelvis
-    const pelvisGeo = new THREE.CapsuleGeometry(0.26, 0.22, 4, 10);
+    // Abdomen guard
+    const abdGeo = new THREE.BoxGeometry(0.4, 0.22, 0.24);
+    const abd = new THREE.Mesh(abdGeo, armorMat);
+    abd.position.set(0, 1.14, 0.15);
+    abd.rotation.x = 0.12;
+    abd.castShadow = true;
+    this.bodyGroup.add(abd);
+
+    // Hexagonal chest reactor (fruit colored)
+    this.reactorMat = new THREE.MeshBasicMaterial({ color: 0xb026ff, fog: false });
+    this.reactor = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.07, 6), this.reactorMat);
+    this.reactor.rotation.x = Math.PI / 2;
+    this.reactor.position.set(0, 1.46, 0.36);
+    this.bodyGroup.add(this.reactor);
+    // Reactor bezel
+    const bezel = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.04, 6), jointMat);
+    bezel.rotation.x = Math.PI / 2;
+    bezel.position.set(0, 1.46, 0.34);
+    this.bodyGroup.add(bezel);
+
+    // Pelvis + belt
+    const pelvisGeo = new THREE.CapsuleGeometry(0.26, 0.2, 4, 10);
     this.pelvis = new THREE.Mesh(pelvisGeo, armorDark);
     this.pelvis.position.y = 0.92;
     this.pelvis.castShadow = true;
     this.bodyGroup.add(this.pelvis);
 
-    // ---------- Head / Helmet ----------
-    const headGeo = new THREE.SphereGeometry(0.24, 16, 14);
+    const beltMat = new THREE.MeshStandardMaterial({ color: 0x1a2637, roughness: 0.5, metalness: 0.7 });
+    const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.29, 0.31, 0.1, 14), beltMat);
+    belt.position.y = 0.86;
+    this.bodyGroup.add(belt);
+    // Glowing belt buckle
+    this.buckleMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, fog: false });
+    const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.06, 0.05), this.buckleMat);
+    buckle.position.set(0, 0.86, 0.3);
+    this.bodyGroup.add(buckle);
+
+    // ---------- Head: faceted helmet + visor ----------
+    const headGeo = new THREE.IcosahedronGeometry(0.24, 0);
     this.head = new THREE.Mesh(headGeo, armorMat);
     this.head.position.y = 2.02;
+    this.head.scale.set(0.92, 1.05, 1.0);
     this.head.castShadow = true;
     this.bodyGroup.add(this.head);
 
-    // Visor (full face glow slit)
+    // Jaw guard
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.14, 0.2), armorDark);
+    jaw.position.set(0, 1.9, 0.12);
+    this.bodyGroup.add(jaw);
+
+    // Full-face visor glow slit
     this.visorMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, fog: false });
-    const visorGeo = new THREE.BoxGeometry(0.34, 0.1, 0.12);
+    const visorGeo = new THREE.BoxGeometry(0.3, 0.07, 0.08);
     this.visor = new THREE.Mesh(visorGeo, this.visorMat);
-    this.visor.position.set(0, 2.04, 0.2);
+    this.visor.position.set(0, 2.05, 0.2);
     this.bodyGroup.add(this.visor);
 
-    // Head crest light
+    // Helmet crest (twin fins)
     const crestMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9, fog: false });
-    const crest = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.08, 0.3), crestMat);
-    crest.position.set(0, 2.28, 0);
-    this.bodyGroup.add(crest);
+    for (const x of [-0.07, 0.07]) {
+      const crest = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.14, 0.26), crestMat);
+      crest.position.set(x, 2.26, -0.02);
+      crest.rotation.x = 0.15;
+      this.bodyGroup.add(crest);
+    }
     this.crestMat = crestMat;
 
-    // ---------- Arms ----------
-    const shoulderGeo = new THREE.SphereGeometry(0.17, 12, 10);
-    const upperArmGeo = new THREE.CapsuleGeometry(0.11, 0.34, 4, 8);
-    const foreArmGeo = new THREE.CapsuleGeometry(0.1, 0.3, 4, 8);
+    // ---------- Arms: asymmetric pauldrons + bracers ----------
+    const upperArmGeo = new THREE.CapsuleGeometry(0.105, 0.32, 4, 8);
+    const foreArmGeo = new THREE.CapsuleGeometry(0.095, 0.28, 4, 8);
 
     this.leftArm = new THREE.Group();
-    this.leftArm.position.set(-0.52, 1.62, 0);
-    const lShoulder = new THREE.Mesh(shoulderGeo, armorMat);
+    this.leftArm.position.set(-0.5, 1.6, 0);
+    const lShoulder = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), armorMat);
     lShoulder.castShadow = true;
     this.leftArm.add(lShoulder);
-    // Pauldron
-    const pauldronGeo = new THREE.SphereGeometry(0.2, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-    const pauldronMat = new THREE.MeshStandardMaterial({ color: 0x24405f, roughness: 0.3, metalness: 0.9 });
-    const pauldron = new THREE.Mesh(pauldronGeo, pauldronMat);
-    pauldron.scale.set(1.15, 0.9, 1.15);
-    pauldron.castShadow = true;
-    this.leftArm.add(pauldron);
+    // Small angular pauldron (left)
+    const pauldronL = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.14, 0.34), armorAccent);
+    pauldronL.position.set(-0.04, 0.12, 0);
+    pauldronL.rotation.z = 0.3;
+    pauldronL.castShadow = true;
+    this.leftArm.add(pauldronL);
     this.leftUpper = new THREE.Mesh(upperArmGeo, jointMat);
     this.leftUpper.position.y = -0.24;
     this.leftUpper.castShadow = true;
     this.leftArm.add(this.leftUpper);
     this.leftFore = new THREE.Mesh(foreArmGeo, armorDark);
-    this.leftFore.position.y = -0.56;
+    this.leftFore.position.y = -0.54;
     this.leftFore.castShadow = true;
     this.leftArm.add(this.leftFore);
+    // Forearm bracer + glow strip
+    const bracerL = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.13, 0.22, 8), armorMat);
+    bracerL.position.y = -0.56;
+    this.leftArm.add(bracerL);
+    const stripL = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.2, 0.03), crestMat);
+    stripL.position.set(-0.115, -0.56, 0);
+    this.leftArm.add(stripL);
     this.bodyGroup.add(this.leftArm);
 
     this.rightArm = new THREE.Group();
-    this.rightArm.position.set(0.52, 1.62, 0);
-    const rShoulder = new THREE.Mesh(shoulderGeo, armorMat);
+    this.rightArm.position.set(0.5, 1.6, 0);
+    const rShoulder = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), armorMat);
     rShoulder.castShadow = true;
     this.rightArm.add(rShoulder);
-    const pauldronR = new THREE.Mesh(pauldronGeo, pauldronMat);
-    pauldronR.scale.set(1.15, 0.9, 1.15);
-    pauldronR.castShadow = true;
-    this.rightArm.add(pauldronR);
+    // BIG layered angular pauldron (right, weapon side)
+    const pauldronR1 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.44), armorMat);
+    pauldronR1.position.set(0.06, 0.14, 0);
+    pauldronR1.rotation.z = -0.25;
+    pauldronR1.castShadow = true;
+    this.rightArm.add(pauldronR1);
+    const pauldronR2 = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 0.38), armorAccent);
+    pauldronR2.position.set(0.08, 0.06, 0.02);
+    pauldronR2.rotation.z = -0.4;
+    pauldronR2.castShadow = true;
+    this.rightArm.add(pauldronR2);
+    // Pauldron edge light
+    const edgeR = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.025, 0.06), crestMat);
+    edgeR.position.set(0.06, 0.2, 0.18);
+    edgeR.rotation.z = -0.25;
+    this.rightArm.add(edgeR);
     this.rightUpper = new THREE.Mesh(upperArmGeo, jointMat);
     this.rightUpper.position.y = -0.24;
     this.rightUpper.castShadow = true;
     this.rightArm.add(this.rightUpper);
     this.rightFore = new THREE.Mesh(foreArmGeo, armorDark);
-    this.rightFore.position.y = -0.56;
+    this.rightFore.position.y = -0.54;
     this.rightFore.castShadow = true;
     this.rightArm.add(this.rightFore);
+    const bracerR = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.13, 0.22, 8), armorMat);
+    bracerR.position.y = -0.56;
+    this.rightArm.add(bracerR);
+    const stripR = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.2, 0.03), crestMat);
+    stripR.position.set(0.115, -0.56, 0);
+    this.rightArm.add(stripR);
     this.bodyGroup.add(this.rightArm);
 
-    // Weapon hold point (relative to right arm, at the forearm)
+    // Weapon hold point (right forearm)
     this.weaponMount = new THREE.Group();
-    this.weaponMount.position.set(0, -0.62, 0.18);
+    this.weaponMount.position.set(0, -0.6, 0.18);
     this.rightArm.add(this.weaponMount);
 
-    // ---------- Legs ----------
-    const thighGeo = new THREE.CapsuleGeometry(0.14, 0.34, 4, 8);
-    const shinGeo = new THREE.CapsuleGeometry(0.12, 0.3, 4, 8);
-    const bootGeo = new THREE.BoxGeometry(0.2, 0.14, 0.3);
-    const bootMat = new THREE.MeshStandardMaterial({ color: 0x0a1119, roughness: 0.4, metalness: 0.8 });
+    // ---------- Legs: armored thigh + shin + glow-soled boots ----------
+    const thighGeo = new THREE.CapsuleGeometry(0.135, 0.32, 4, 8);
+    const shinGeo = new THREE.CapsuleGeometry(0.11, 0.28, 4, 8);
 
-    this.leftLeg = new THREE.Group();
-    this.leftLeg.position.set(-0.22, 0.86, 0);
-    const lThigh = new THREE.Mesh(thighGeo, armorMat);
-    lThigh.position.y = -0.22;
-    lThigh.castShadow = true;
-    this.leftLeg.add(lThigh);
-    this.leftShin = new THREE.Mesh(shinGeo, armorDark);
-    this.leftShin.position.y = -0.55;
-    this.leftShin.castShadow = true;
-    this.leftLeg.add(this.leftShin);
-    const lBoot = new THREE.Mesh(bootGeo, bootMat);
-    lBoot.position.set(0, -0.78, 0.04);
-    lBoot.castShadow = true;
-    this.leftLeg.add(lBoot);
+    const makeLeg = (x) => {
+      const leg = new THREE.Group();
+      leg.position.set(x, 0.86, 0);
+      const thigh = new THREE.Mesh(thighGeo, armorMat);
+      thigh.position.y = -0.22;
+      thigh.castShadow = true;
+      leg.add(thigh);
+      // Thigh plate
+      const thighPlate = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.3, 0.1), armorAccent);
+      thighPlate.position.set(0, -0.2, 0.12);
+      thighPlate.castShadow = true;
+      leg.add(thighPlate);
+      const shin = new THREE.Mesh(shinGeo, armorDark);
+      shin.position.y = -0.54;
+      shin.castShadow = true;
+      leg.add(shin);
+      // Knee cap + glow
+      const knee = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), armorAccent);
+      knee.position.set(0, -0.4, 0.1);
+      leg.add(knee);
+      const kneeGlow = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.03, 0.03), crestMat);
+      kneeGlow.position.set(0, -0.4, 0.18);
+      leg.add(kneeGlow);
+      // Chunky boot + glow sole
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.13, 0.3), new THREE.MeshStandardMaterial({ color: 0x0a1119, roughness: 0.4, metalness: 0.8 }));
+      boot.position.set(0, -0.76, 0.04);
+      boot.castShadow = true;
+      leg.add(boot);
+      const soleGlow = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.02, 0.28), crestMat);
+      soleGlow.position.set(0, -0.82, 0.04);
+      leg.add(soleGlow);
+      return leg;
+    };
+    this.leftLeg = makeLeg(-0.21);
+    this.rightLeg = makeLeg(0.21);
     this.bodyGroup.add(this.leftLeg);
-
-    this.rightLeg = new THREE.Group();
-    this.rightLeg.position.set(0.22, 0.86, 0);
-    const rThigh = new THREE.Mesh(thighGeo, armorMat);
-    rThigh.position.y = -0.22;
-    rThigh.castShadow = true;
-    this.rightLeg.add(rThigh);
-    this.rightShin = new THREE.Mesh(shinGeo, armorDark);
-    this.rightShin.position.y = -0.55;
-    this.rightShin.castShadow = true;
-    this.rightLeg.add(this.rightShin);
-    const rBoot = new THREE.Mesh(bootGeo, bootMat);
-    rBoot.position.set(0, -0.78, 0.04);
-    rBoot.castShadow = true;
-    this.rightLeg.add(rBoot);
     this.bodyGroup.add(this.rightLeg);
 
-    // ---------- Backpack + Thrusters ----------
-    const packGeo = new THREE.BoxGeometry(0.42, 0.5, 0.16);
+    // ---------- Backpack + twin thrusters ----------
+    const packGeo = new THREE.BoxGeometry(0.4, 0.46, 0.15);
     const pack = new THREE.Mesh(packGeo, armorDark);
-    pack.position.set(0, 1.42, -0.3);
+    pack.position.set(0, 1.4, -0.28);
     pack.castShadow = true;
     this.bodyGroup.add(pack);
+    const packCell = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.14, 0.06), crestMat);
+    packCell.position.set(0, 1.5, -0.36);
+    this.bodyGroup.add(packCell);
 
     this.thrusterMat = new THREE.MeshBasicMaterial({ color: 0x223344, fog: false });
-    const nozzleGeo = new THREE.CylinderGeometry(0.06, 0.09, 0.14, 10);
-    for (const x of [-0.13, 0.13]) {
+    const nozzleGeo = new THREE.CylinderGeometry(0.055, 0.085, 0.15, 10);
+    for (const x of [-0.12, 0.12]) {
       const n = new THREE.Mesh(nozzleGeo, this.thrusterMat);
-      n.position.set(x, 1.18, -0.34);
+      n.position.set(x, 1.16, -0.32);
       this.bodyGroup.add(n);
     }
+
+    // ---------- Flowing energy cape ----------
+    // Vertically segmented plane draped from the shoulders; vertices are
+    // animated every frame (cheap CPU wave, more cloth-like than a shader).
+    const capeGeo = new THREE.PlaneGeometry(0.95, 1.25, 6, 10);
+    const capeMat = new THREE.MeshStandardMaterial({
+      color: 0x141d2e, roughness: 0.85, metalness: 0.2, side: THREE.DoubleSide,
+    });
+    this.cape = new THREE.Mesh(capeGeo, capeMat);
+    this.cape.position.set(0, 1.78, -0.3);
+    this.cape.rotation.x = 0.12;
+    this.capeBasePositions = capeGeo.attributes.position.array.slice();
+    this.bodyGroup.add(this.cape);
+    // Glowing trim along the cape hem
+    const trimGeo = new THREE.BoxGeometry(0.95, 0.035, 0.012);
+    this.capeTrimMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.75, fog: false });
+    this.capeTrim = new THREE.Mesh(trimGeo, this.capeTrimMat);
+    this.capeTrim.position.set(0, -0.62, 0.02);
+    this.cape.add(this.capeTrim);
 
     // Dash glow sprite (behind, shown during dash)
     this.dashSpriteMat = new THREE.SpriteMaterial({
@@ -334,8 +447,38 @@ export class Player {
 
     // Current weapon mesh container
     this.currentWeaponMesh = null;
-    this.equippedSwordType = 'gravity_blade';
-    this.updateWeaponVisuals('gravity_blade');
+    this.equippedSwordType = 'none';
+    this.updateWeaponVisuals('none');
+  }
+
+  /**
+   * Animate the cape cloth: layered sine waves traveling down the fabric,
+   * amplitude scales with movement speed and dashes.
+   */
+  animateCape(dt) {
+    if (!this.cape) return;
+    const posAttr = this.cape.geometry.attributes.position;
+    const arr = posAttr.array;
+    const base = this.capeBasePositions;
+    const t = this.animTime * 6.0;
+
+    const speed = (this.isMoving ? this.moveSpeed : 0) * 0.06;
+    const dash = this.dashTimer > 0 ? 1.8 : 0;
+    const amp = 0.03 + speed * 0.5 + dash * 0.25;
+
+    for (let i = 0; i < posAttr.count; i++) {
+      const bx = base[i * 3];
+      const by = base[i * 3 + 1];
+      // Row factor: 0 at the shoulder, 1 at the hem
+      const row = 0.5 - by / 1.25;
+      const wave =
+        Math.sin(t + bx * 4.0 + row * 2.8) * row * row * amp * 0.8 +
+        Math.sin(t * 1.7 + bx * 7.0 + row * 5.0) * row * amp * 0.35;
+      arr[i * 3] = bx + Math.sin(t * 0.9 + row * 2.0) * row * amp * 0.5;
+      arr[i * 3 + 1] = by;
+      arr[i * 3 + 2] = -row * 0.22 + wave;
+    }
+    posAttr.needsUpdate = true;
   }
 
   createAimReticle() {
@@ -408,18 +551,20 @@ export class Player {
     const swordGroup = new THREE.Group();
     this.weaponGlowMats = [];
 
-    // Shared hilt
-    const hiltGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.5, 8);
-    const hiltMat = new THREE.MeshStandardMaterial({ color: 0x222b38, metalness: 0.9, roughness: 0.3 });
-    const hilt = new THREE.Mesh(hiltGeo, hiltMat);
-    hilt.position.y = 0.25;
-    swordGroup.add(hilt);
+    // Shared hilt (skipped for bare fists)
+    if (swordType !== 'none') {
+      const hiltGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.5, 8);
+      const hiltMat = new THREE.MeshStandardMaterial({ color: 0x222b38, metalness: 0.9, roughness: 0.3 });
+      const hilt = new THREE.Mesh(hiltGeo, hiltMat);
+      hilt.position.y = 0.25;
+      swordGroup.add(hilt);
 
-    const guardGeo = new THREE.BoxGeometry(0.3, 0.05, 0.1);
-    const guardMat = new THREE.MeshStandardMaterial({ color: 0x33405a, metalness: 0.9, roughness: 0.25 });
-    const guard = new THREE.Mesh(guardGeo, guardMat);
-    guard.position.y = 0.52;
-    swordGroup.add(guard);
+      const guardGeo = new THREE.BoxGeometry(0.3, 0.05, 0.1);
+      const guardMat = new THREE.MeshStandardMaterial({ color: 0x33405a, metalness: 0.9, roughness: 0.25 });
+      const guard = new THREE.Mesh(guardGeo, guardMat);
+      guard.position.y = 0.52;
+      swordGroup.add(guard);
+    }
 
     if (swordType === 'gravity_blade') {
       // Purple / Obsidian heavy blade with hot energy edge
@@ -506,6 +651,24 @@ export class Player {
       core.position.y = 1.42;
       swordGroup.add(core);
       this.weaponGlowMats.push(edgeMat);
+    } else {
+      // BARE FISTS: energy gauntlets (no sword equipped)
+      const fistGeo = new THREE.SphereGeometry(0.13, 10, 8);
+      const fistMat = new THREE.MeshStandardMaterial({ color: 0x2a3a52, roughness: 0.4, metalness: 0.8 });
+      const fist = new THREE.Mesh(fistGeo, fistMat);
+      fist.position.y = 0.08;
+      fist.scale.set(1.1, 0.9, 1.2);
+      swordGroup.add(fist);
+
+      const knuckleMat = new THREE.MeshBasicMaterial({
+        color: 0x88ccff, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, fog: false,
+      });
+      const knuckles = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.02, 6, 12, Math.PI), knuckleMat);
+      knuckles.position.set(0, 0.12, 0.05);
+      knuckles.rotation.x = -Math.PI / 2;
+      swordGroup.add(knuckles);
+      this.weaponGlowMats.push(knuckleMat);
     }
 
     this.currentWeaponMesh = swordGroup;
@@ -559,6 +722,70 @@ export class Player {
 
   heal(amount) {
     this.hp = Math.min(this.maxHp, this.hp + amount);
+  }
+
+  /**
+   * XP required to advance from the current level to the next.
+   * Gentle curve at low levels, keeps climbing to level 100,000,000.
+   */
+  xpNeeded() {
+    return Math.floor(100 * Math.pow(this.level, 1.55));
+  }
+
+  /**
+   * Grant XP. Returns the number of levels gained (may be >1, or 0).
+   * Each level grants +3 stat points.
+   */
+  gainXp(amount) {
+    amount = Math.max(0, Math.floor(amount));
+    if (amount === 0 || this.level >= this.MAX_LEVEL) return 0;
+
+    this.xp += amount;
+    let levelsGained = 0;
+    let need = this.xpNeeded();
+    while (this.xp >= need && this.level < this.MAX_LEVEL) {
+      this.xp -= need;
+      this.level++;
+      levelsGained++;
+      need = this.xpNeeded();
+    }
+    if (this.level >= this.MAX_LEVEL) this.xp = 0;
+
+    if (levelsGained > 0) {
+      this.statPoints += levelsGained * 3;
+    }
+    return levelsGained;
+  }
+
+  /**
+   * Apply stat allocation to derived values.
+   * Each point: +50 max health / +50 fruit dmg / +50 gun dmg / +50 sword dmg.
+   */
+  applyStats() {
+    const newMax = this.baseMaxHp + this.stats.health * 50;
+    if (newMax > this.maxHp) {
+      // Top up current HP for the newly gained pool
+      this.hp += (newMax - this.maxHp);
+    }
+    this.maxHp = newMax;
+    this.hp = Math.min(this.hp, this.maxHp);
+
+    this.fruitDamageBonus = this.stats.fruit * 50;
+    this.gunDamageBonus = this.stats.gun * 50;
+    this.swordDamageBonus = this.stats.sword * 50;
+  }
+
+  /**
+   * Spend stat points on a stat. Returns false if not enough points.
+   */
+  spendStatPoints(statKey, count) {
+    if (!this.stats.hasOwnProperty(statKey)) return false;
+    count = Math.floor(count);
+    if (count <= 0 || count > this.statPoints) return false;
+    this.stats[statKey] += count;
+    this.statPoints -= count;
+    this.applyStats();
+    return true;
   }
 
   setAimTarget(worldPos) {
@@ -670,6 +897,7 @@ export class Player {
     // 5. Procedural animation
     this.animTime += dt;
     this.animateBody(dt);
+    this.animateCape(dt);
 
     // 6. Weapon slash animation
     if (this.isAttacking) {

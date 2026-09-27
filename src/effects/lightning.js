@@ -21,6 +21,29 @@ const VERTICES_PER_BOLT = (MAX_SEGMENTS - 1) * 2;
 const FLASH_LIGHT_POOL = 8;
 const GROUND_FLASH_POOL = 12;
 
+/**
+ * Realistic lightning flicker envelope.
+ * Real strikes are NOT a single smooth fade - the return stroke fires,
+ * dims, then re-strikes 1-2 more times within ~300ms before dying.
+ * Returns brightness 0..1 for a normalized time t.
+ */
+function strikeEnvelope(t, seed) {
+  // Strike 1: instant peak at channel formation
+  let b = Math.exp(-t * 14.0);
+  // Strike 2: re-strike at 25-45% of the life
+  const t2 = 0.25 + (seed % 1) * 0.2;
+  b += 0.8 * Math.exp(-Math.abs(t - t2) * 20.0);
+  // Strike 3: 60% of bolts get a final micro re-strike
+  if (Math.floor(seed * 17) % 10 < 6) {
+    const t3 = t2 + 0.16 + (seed % 0.3) * 0.08;
+    b += 0.55 * Math.exp(-Math.abs(t - t3) * 30.0);
+  }
+  // Fine crackle near the tail (fast stochastic shimmer)
+  const crackle = Math.sin(t * 61.0 + seed * 40.0) * Math.sin(t * 23.7 + seed * 9.0);
+  b += Math.max(0, crackle) * 0.12 * (t > 0.3 ? 1 : 0);
+  return Math.max(0, Math.min(1, b));
+}
+
 class LightningBolt {
   constructor(scene) {
     this.scene = scene;
@@ -30,12 +53,16 @@ class LightningBolt {
     this.duration = 0.3;
     this.elapsed = 0;
     this.timer001 = 0;
-    this.color = new THREE.Color('#00f0ff');
+    this.color = new THREE.Color('#e8f4ff');
+    this.baseColor = new THREE.Color('#e8f4ff');
+    this.white = new THREE.Color(0xffffff);
+    this.brightness = 0;
+    this.flickerSeed = Math.random();
     this.branchCount = 2;
     this.segments = 24;
 
-    // Pre-allocated Float32Array for positions (main trunk + side branches)
-    this.maxPoints = 48;
+    // Pre-allocated Float32Array for positions (trunk + up to 4 branches)
+    this.maxPoints = 96;
     this.positions = new Float32Array(this.maxPoints * 3 * 2);
 
     this.geometry = new THREE.BufferGeometry();
@@ -43,9 +70,9 @@ class LightningBolt {
     this.posAttribute.setUsage(THREE.DynamicDrawUsage);
     this.geometry.setAttribute('position', this.posAttribute);
 
+    // Outer channel: colored plasma (linewidth ignored by WebGL, kept thin)
     this.material = new THREE.LineBasicMaterial({
-      color: 0x00f0ff,
-      linewidth: 3,
+      color: 0xe8f4ff,
       transparent: true,
       opacity: 1.0,
       blending: THREE.AdditiveBlending,
@@ -58,10 +85,9 @@ class LightningBolt {
     this.lineMesh.visible = false;
     this.scene.add(this.lineMesh);
 
-    // Inner core glow line for volumetric sci-fi look
+    // Inner white-hot core (same geometry, brighter)
     this.coreMaterial = new THREE.LineBasicMaterial({
       color: 0xffffff,
-      linewidth: 1.5,
       transparent: true,
       opacity: 0.9,
       blending: THREE.AdditiveBlending,
@@ -74,17 +100,18 @@ class LightningBolt {
     this.scene.add(this.coreLineMesh);
   }
 
-  spawn(startPos, endPos, colorHex = '#00f0ff', duration = 0.28, branches = 2, customSegments = 24) {
+  spawn(startPos, endPos, colorHex = '#e8f4ff', duration = 0.34, branches = 3, customSegments = 24) {
     this.startPos.copy(startPos);
     this.endPos.copy(endPos);
-    this.color.set(colorHex);
+    this.baseColor.set(colorHex);
+    this.color.copy(this.baseColor);
     this.duration = duration;
     this.elapsed = 0;
     this.timer001 = 0;
+    this.flickerSeed = Math.random();
     this.branchCount = branches;
-    this.segments = Math.min(customSegments, this.maxPoints / 2);
+    this.segments = Math.min(customSegments, 30);
 
-    this.material.color.copy(this.color);
     this.material.opacity = 1.0;
     this.coreMaterial.opacity = 1.0;
 
@@ -97,8 +124,12 @@ class LightningBolt {
   }
 
   /**
-   * High frequency procedural re-rotation & displacement of segments.
-   * Calculates jagged vertices between startPos and endPos with midpoint jitter.
+   * High frequency procedural re-rotation of the discharge channel.
+   * Uses a BOUNDED RANDOM WALK instead of independent jitter per vertex:
+   * each vertex continues from the previous one with a small random step,
+   * producing natural connected kinks (real leader structure) rather than
+   * uncorrelated vibration. Occasional large "kink" events mimic branching
+   * of the leader.
    */
   recalculateSegments() {
     let idx = 0;
@@ -106,36 +137,42 @@ class LightningBolt {
     const dir = new THREE.Vector3().subVectors(this.endPos, this.startPos);
     const totalDist = dir.length();
 
-    // Trunk segments
+    // Random-walk state (bounded drift around the ideal straight line)
+    let walkX = 0, walkY = 0, walkZ = 0;
+    const lateralMax = Math.min(2.4, totalDist * 0.05);
+
     let prevX = this.startPos.x;
     let prevY = this.startPos.y;
     let prevZ = this.startPos.z;
 
-    const lateralMax = Math.min(3.5, totalDist * 0.08);
-
     for (let i = 1; i <= segs; i++) {
       const t = i / segs;
-      // Linear interpolation along line
-      let curX = this.startPos.x + dir.x * t;
-      let curY = this.startPos.y + dir.y * t;
-      let curZ = this.startPos.z + dir.z * t;
 
-      if (i < segs) {
-        // High-frequency jitter & rotation angle:
-        const angle = Math.random() * Math.PI * 2.0;
-        const rad = (Math.random() * 0.8 + 0.2) * lateralMax;
-        // Jitter orthogonal to direction
-        curX += Math.cos(angle) * rad;
-        curZ += Math.sin(angle) * rad;
-        curY += (Math.random() - 0.5) * (lateralMax * 0.4);
-      } else {
+      // Bounded random walk: step, then clamp toward the straight line
+      walkX += (Math.random() * 2 - 1) * lateralMax * 0.55;
+      walkY += (Math.random() * 2 - 1) * lateralMax * 0.22;
+      walkZ += (Math.random() * 2 - 1) * lateralMax * 0.55;
+      // ~8% chance of a sharp kink (leader bifurcation)
+      if (Math.random() < 0.08) {
+        const k = lateralMax * 2.2;
+        walkX += (Math.random() * 2 - 1) * k;
+        walkZ += (Math.random() * 2 - 1) * k;
+      }
+      // Re-center: pull the walk back toward zero as we approach the target
+      const pull = 1.0 - Math.abs(2.0 * t - 1.0) * 0.7;
+      walkX *= pull; walkY *= pull; walkZ *= pull;
+
+      let curX = this.startPos.x + dir.x * t + walkX;
+      let curY = this.startPos.y + dir.y * t + walkY;
+      let curZ = this.startPos.z + dir.z * t + walkZ;
+
+      if (i === segs) {
         // Terminal strike point locked to endPos
         curX = this.endPos.x;
         curY = this.endPos.y;
         curZ = this.endPos.z;
       }
 
-      // Add segment line (prev -> cur)
       this.positions[idx++] = prevX;
       this.positions[idx++] = prevY;
       this.positions[idx++] = prevZ;
@@ -149,30 +186,35 @@ class LightningBolt {
       prevZ = curZ;
     }
 
-    // Side Branches if requested
-    if (this.branchCount > 0 && idx + 12 < this.positions.length) {
-      // Pick random mid vertex as branch root
-      const branchT = 0.4 + Math.random() * 0.3;
-      const bRootX = this.startPos.x + dir.x * branchT + (Math.random() - 0.5) * lateralMax;
-      const bRootY = this.startPos.y + dir.y * branchT;
-      const bRootZ = this.startPos.z + dir.z * branchT + (Math.random() - 0.5) * lateralMax;
+    // Side branches: short, angled outward + downward from actual trunk vertices
+    for (let bIdx = 0; bIdx < this.branchCount; bIdx++) {
+      if (idx + 10 >= this.positions.length) break;
 
-      const branchLen = totalDist * 0.3;
+      // Root = an actual trunk vertex (vertex k lives at positions[k*3 .. k*3+2])
+      const rootK = 2 + Math.floor(Math.random() * (segs - 3));
+      const bRootX = this.positions[rootK * 3];
+      const bRootY = this.positions[rootK * 3 + 1];
+      const bRootZ = this.positions[rootK * 3 + 2];
+
+      const branchLen = totalDist * (0.12 + Math.random() * 0.16);
       const bAngle = Math.random() * Math.PI * 2;
-      const bEndX = bRootX + Math.cos(bAngle) * branchLen;
-      const bEndY = bRootY - branchLen * 0.5;
-      const bEndZ = bRootZ + Math.sin(bAngle) * branchLen;
+      const segsB = 3 + Math.floor(Math.random() * 2);
 
-      // Add 2 segments for the branch
-      const bMidX = (bRootX + bEndX) * 0.5 + (Math.random() - 0.5) * (lateralMax * 0.7);
-      const bMidY = (bRootY + bEndY) * 0.5;
-      const bMidZ = (bRootZ + bEndZ) * 0.5 + (Math.random() - 0.5) * (lateralMax * 0.7);
+      let px = bRootX, py = bRootY, pz = bRootZ;
+      for (let s = 1; s <= segsB; s++) {
+        const cx = px + Math.cos(bAngle) * branchLen / segsB + (Math.random() - 0.5) * lateralMax * 0.4;
+        const cy = py - branchLen * (0.55 + Math.random() * 0.3) / segsB;
+        const cz = pz + Math.sin(bAngle) * branchLen / segsB + (Math.random() - 0.5) * lateralMax * 0.4;
 
-      this.positions[idx++] = bRootX; this.positions[idx++] = bRootY; this.positions[idx++] = bRootZ;
-      this.positions[idx++] = bMidX;  this.positions[idx++] = bMidY;  this.positions[idx++] = bMidZ;
+        this.positions[idx++] = px;
+        this.positions[idx++] = py;
+        this.positions[idx++] = pz;
+        this.positions[idx++] = cx;
+        this.positions[idx++] = cy;
+        this.positions[idx++] = cz;
 
-      this.positions[idx++] = bMidX;  this.positions[idx++] = bMidY;  this.positions[idx++] = bMidZ;
-      this.positions[idx++] = bEndX;  this.positions[idx++] = bEndY;  this.positions[idx++] = bEndZ;
+        px = cx; py = cy; pz = cz;
+      }
     }
 
     // Zero out unused vertex buffer portion
@@ -193,6 +235,7 @@ class LightningBolt {
       this.active = false;
       this.lineMesh.visible = false;
       this.coreLineMesh.visible = false;
+      this.brightness = 0;
       return;
     }
 
@@ -202,10 +245,17 @@ class LightningBolt {
       this.recalculateSegments();
     }
 
-    // Fade out towards end of life
-    const remainRatio = 1.0 - (this.elapsed / this.duration);
-    this.material.opacity = Math.max(0, remainRatio);
-    this.coreMaterial.opacity = Math.max(0, remainRatio);
+    // Realistic multi-strike flicker (NOT a smooth fade)
+    const t = this.elapsed / this.duration;
+    this.brightness = strikeEnvelope(t, this.flickerSeed);
+
+    // White-hot core peaks brighter than the colored channel
+    this.material.opacity = 0.55 + 0.45 * this.brightness;
+    this.coreMaterial.opacity = this.brightness;
+
+    // Channel shifts toward pure white at each strike peak
+    this.material.color.copy(this.baseColor).lerp(this.white, this.brightness * 0.65);
+    this.coreMaterial.color.copy(this.baseColor).lerp(this.white, 0.4 + this.brightness * 0.6);
   }
 
   dispose() {
@@ -241,7 +291,7 @@ export class LightningManager {
       const l = new THREE.PointLight(0x00f0ff, 0, 260, 1.8);
       l.visible = false;
       scene.add(l);
-      this.flashLights.push({ light: l, intensity: 0, duration: 0.3, elapsed: 99 });
+      this.flashLights.push({ light: l, intensity: 0, duration: 0.3, elapsed: 99, seed: Math.random() });
     }
 
     // Ground impact flash rings (pooled)
@@ -290,17 +340,18 @@ export class LightningManager {
     fl.intensity = 550 * power;
     fl.duration = duration;
     fl.elapsed = 0;
+    fl.seed = Math.random();
   }
 
   /** Expand a bright ring at the impact point. */
   _groundFlash(pos, colorHex, maxR = 24, duration = 0.45) {
     let g = this.groundFlashes.find(f => !f.active);
     if (!g) g = this.groundFlashes[0];
-    g.mesh.position.set(pos.x, pos.y + 0.35, pos.z);
-    g.mat.color.set(colorHex);
-    g.mesh.visible = true;
-    g.mesh.scale.setScalar(1);
-    g.mat.opacity = 0.9;
+      g.mesh.position.set(pos.x, pos.y + 0.35, pos.z);
+      g.mat.color.set(colorHex);
+      g.mesh.visible = true;
+      g.mesh.scale.setScalar(1);
+      g.mat.opacity = 0.5;
     g.elapsed = 0;
     g.duration = duration;
     g.maxR = maxR;
@@ -310,7 +361,7 @@ export class LightningManager {
   /**
    * Strike a tall vertical jagged lightning bolt from sky to target.
    */
-  strikeBolt(groundPos, height = 120, colorHex = '#00f0ff', duration = 0.3, customSegments = 24) {
+  strikeBolt(groundPos, height = 120, colorHex = '#dceeff', duration = 0.34, customSegments = 24) {
     const startPos = new THREE.Vector3(
       groundPos.x + (Math.random() - 0.5) * 8.0,
       groundPos.y + height,
@@ -392,7 +443,7 @@ export class LightningManager {
       }
     }
 
-    // Dynamic flash lights (fast decay with a flicker for realism)
+    // Dynamic flash lights - same multi-strike flicker as the bolt itself
     for (const fl of this.flashLights) {
       if (!fl.light.visible) continue;
       fl.elapsed += dt;
@@ -402,9 +453,7 @@ export class LightningManager {
         continue;
       }
       const t = fl.elapsed / fl.duration;
-      const decay = Math.pow(1.0 - t, 2.2);
-      const flicker = 0.7 + 0.3 * Math.sin(fl.elapsed * 90.0);
-      fl.light.intensity = fl.intensity * decay * flicker;
+      fl.light.intensity = fl.intensity * strikeEnvelope(t, fl.seed);
     }
 
     // Ground impact rings
@@ -419,7 +468,7 @@ export class LightningManager {
       }
       const r = g.maxR * (1.0 - Math.pow(1.0 - t, 3.0));
       g.mesh.scale.setScalar(Math.max(0.001, r));
-      g.mat.opacity = (1.0 - t) * 0.9;
+      g.mat.opacity = strikeEnvelope(t, 0.3) * 0.5;
     }
   }
 

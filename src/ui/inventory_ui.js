@@ -52,9 +52,7 @@ export class InventoryUI {
     }
 
     if (this.closeFruitModalBtn) {
-      this.closeFruitModalBtn.addEventListener('click', () => {
-        this.fruitModal.style.display = 'none';
-      });
+      this.closeFruitModalBtn.addEventListener('click', () => this.closeFruitModal());
     }
 
     // Open Sword Modal
@@ -65,9 +63,7 @@ export class InventoryUI {
     }
 
     if (this.closeSwordModalBtn) {
-      this.closeSwordModalBtn.addEventListener('click', () => {
-        this.swordModal.style.display = 'none';
-      });
+      this.closeSwordModalBtn.addEventListener('click', () => this.closeSwordModal());
     }
 
     // Active Switch Slot (Fruit / Sword active cast focus)
@@ -108,6 +104,7 @@ export class InventoryUI {
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
           modal.style.display = 'none';
+          this.game.sound.playUiClose();
         }
       });
     });
@@ -115,10 +112,22 @@ export class InventoryUI {
 
   openFruitModal() {
     this.fruitModal.style.display = 'flex';
+    this.game.sound.playUiOpen();
+  }
+
+  closeFruitModal() {
+    this.fruitModal.style.display = 'none';
+    this.game.sound.playUiClose();
   }
 
   openSwordModal() {
     this.swordModal.style.display = 'flex';
+    this.game.sound.playUiOpen();
+  }
+
+  closeSwordModal() {
+    this.swordModal.style.display = 'none';
+    this.game.sound.playUiClose();
   }
 
   populateModals() {
@@ -146,8 +155,9 @@ export class InventoryUI {
       `;
 
       card.addEventListener('click', () => {
+        this.game.sound.playEquip();
         this.game.equipFruit(f.id);
-        this.fruitModal.style.display = 'none';
+        this.closeFruitModal();
         this.populateModals();
         this.updateHUD();
       });
@@ -176,8 +186,9 @@ export class InventoryUI {
       `;
 
       card.addEventListener('click', () => {
+        this.game.sound.playEquip();
         this.game.equipSword(s.id);
-        this.swordModal.style.display = 'none';
+        this.closeSwordModal();
         this.populateModals();
         this.updateHUD();
       });

@@ -338,6 +338,247 @@ class SoundSystem {
     osc.start(now);
     osc.stop(now + 0.09);
   }
+
+  // =============================================================
+  // REALISTIC GAME UI SOUNDS (synthesized, zero audio files)
+  // =============================================================
+
+  // 10. Button CLICK - short mechanical tick with a tiny body
+  playUiClick() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    // High tick
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1900, now);
+    osc.frequency.exponentialRampToValueAtTime(700, now + 0.03);
+    g.gain.setValueAtTime(0.06, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+    osc.connect(g); g.connect(this.masterGain);
+    osc.start(now); osc.stop(now + 0.05);
+
+    // Low body thock
+    const thock = this.ctx.createOscillator();
+    const tg = this.ctx.createGain();
+    thock.type = 'sine';
+    thock.frequency.setValueAtTime(240, now);
+    thock.frequency.exponentialRampToValueAtTime(90, now + 0.05);
+    tg.gain.setValueAtTime(0.10, now);
+    tg.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    thock.connect(tg); tg.connect(this.masterGain);
+    thock.start(now); thock.stop(now + 0.07);
+  }
+
+  // 11. Button HOVER - whisper-quiet soft tick (throttled by caller)
+  playUiHover() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(2600, now);
+    g.gain.setValueAtTime(0.016, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+    osc.connect(g); g.connect(this.masterGain);
+    osc.start(now); osc.stop(now + 0.035);
+  }
+
+  // 12. Modal OPEN - rising filtered-noise whoosh + confirmation chime
+  playUiOpen() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const len = this.ctx.sampleRate * 0.22;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(400, now);
+    bp.frequency.exponentialRampToValueAtTime(2400, now + 0.2);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.exponentialRampToValueAtTime(0.07, now + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    src.connect(bp); bp.connect(g); g.connect(this.masterGain);
+    src.start(now);
+
+    const chime = this.ctx.createOscillator();
+    const cg = this.ctx.createGain();
+    chime.type = 'triangle';
+    chime.frequency.setValueAtTime(880, now + 0.06);
+    chime.frequency.setValueAtTime(1318, now + 0.12);
+    cg.gain.setValueAtTime(0.0001, now);
+    cg.gain.exponentialRampToValueAtTime(0.05, now + 0.13);
+    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    chime.connect(cg); cg.connect(this.masterGain);
+    chime.start(now); chime.stop(now + 0.32);
+  }
+
+  // 13. Modal CLOSE - falling filtered-noise whoosh
+  playUiClose() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const len = this.ctx.sampleRate * 0.18;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(2200, now);
+    bp.frequency.exponentialRampToValueAtTime(350, now + 0.16);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.06, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    src.connect(bp); bp.connect(g); g.connect(this.masterGain);
+    src.start(now);
+  }
+
+  // 14. DENIED - low square buzz (not enough points, on cooldown)
+  playUiDeny() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(140, now);
+    osc.frequency.setValueAtTime(110, now + 0.08);
+    g.gain.setValueAtTime(0.07, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(g); g.connect(this.masterGain);
+    osc.start(now); osc.stop(now + 0.17);
+  }
+
+  // 15. LEVEL UP - rising three-note chime with shimmer
+  playLevelUp() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const notes = [523.25, 784.0, 1046.5, 1568.0];
+    notes.forEach((f, i) => {
+      const t = now + i * 0.09;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.09, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      osc.connect(g); g.connect(this.masterGain);
+      osc.start(t); osc.stop(t + 0.55);
+      // Harmonic shimmer an octave up
+      const h = this.ctx.createOscillator();
+      const hg = this.ctx.createGain();
+      h.type = 'triangle';
+      h.frequency.setValueAtTime(f * 2, t);
+      hg.gain.setValueAtTime(0.0001, t);
+      hg.gain.exponentialRampToValueAtTime(0.025, t + 0.02);
+      hg.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+      h.connect(hg); hg.connect(this.masterGain);
+      h.start(t); h.stop(t + 0.4);
+    });
+  }
+
+  // 16. SKILL CAST - powerful anime whoosh (rising saw + noise burst)
+  playSkillCast(pitch = 1.0) {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(120 * pitch, now);
+    osc.frequency.exponentialRampToValueAtTime(720 * pitch, now + 0.18);
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.exponentialRampToValueAtTime(0.14, now + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.connect(g); g.connect(this.masterGain);
+    osc.start(now); osc.stop(now + 0.32);
+
+    const len = this.ctx.sampleRate * 0.25;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.8;
+    bp.frequency.setValueAtTime(300 * pitch, now);
+    bp.frequency.exponentialRampToValueAtTime(1800 * pitch, now + 0.22);
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.10, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    src.connect(bp); bp.connect(ng); ng.connect(this.masterGain);
+    src.start(now);
+  }
+
+  // 17. EQUIP - mechanical clack + metallic ping
+  playEquip() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const len = this.ctx.sampleRate * 0.06;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 900;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.14, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    src.connect(hp); hp.connect(g); g.connect(this.masterGain);
+    src.start(now);
+
+    const ping = this.ctx.createOscillator();
+    const pg = this.ctx.createGain();
+    ping.type = 'triangle';
+    ping.frequency.setValueAtTime(2350, now + 0.03);
+    ping.frequency.exponentialRampToValueAtTime(1600, now + 0.14);
+    pg.gain.setValueAtTime(0.0001, now + 0.03);
+    pg.gain.exponentialRampToValueAtTime(0.06, now + 0.05);
+    pg.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    ping.connect(pg); pg.connect(this.masterGain);
+    ping.start(now + 0.03); ping.stop(now + 0.22);
+  }
+
+  // 18. GAME START - power-up riser on the PLAY button
+  playGameStart() {
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(60, now);
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.45);
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.exponentialRampToValueAtTime(0.12, now + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    osc.connect(g); g.connect(this.masterGain);
+    osc.start(now); osc.stop(now + 0.62);
+
+    const chime = this.ctx.createOscillator();
+    const cg = this.ctx.createGain();
+    chime.type = 'sine';
+    chime.frequency.setValueAtTime(1046.5, now + 0.42);
+    cg.gain.setValueAtTime(0.0001, now + 0.42);
+    cg.gain.exponentialRampToValueAtTime(0.1, now + 0.46);
+    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    chime.connect(cg); cg.connect(this.masterGain);
+    chime.start(now + 0.42); chime.stop(now + 0.92);
+  }
 }
 
 export const sound = new SoundSystem();
