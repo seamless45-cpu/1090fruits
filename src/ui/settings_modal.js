@@ -30,6 +30,8 @@ export class SettingsModal {
     this.valShakeScale = document.getElementById('val-shake-scale');
 
     this.bloomCheckbox = document.getElementById('opt-bloom-toggle');
+    this.bloomSlider = document.getElementById('opt-bloom-intensity');
+    this.valBloom = document.getElementById('val-bloom');
 
     this.viewDistSlider = document.getElementById('opt-view-dist');
     this.valViewDist = document.getElementById('val-view-dist');
@@ -95,6 +97,17 @@ export class SettingsModal {
       });
     }
 
+    if (this.bloomSlider) {
+      this.bloomSlider.addEventListener('input', (e) => {
+        const v = parseFloat(e.target.value);
+        this.valBloom.textContent = `ON (INTENSITY: ${v.toFixed(1)})`;
+        // Live preview
+        if (this.game.bloomPass) {
+          this.game.bloomPass.strength = v;
+        }
+      });
+    }
+
     // Preset handlers
     this.presetBtns.forEach(btn => {
       btn.addEventListener('click', () => {
@@ -117,6 +130,7 @@ export class SettingsModal {
       this.viewDistSlider.value = 400;
       this.valViewDist.textContent = '400 METERS';
       this.bloomCheckbox.checked = false;
+      if (this.bloomSlider) { this.bloomSlider.value = 0.6; this.valBloom.textContent = 'OFF (INTENSITY: 0.0)'; }
     } else if (preset === 'medium') {
       this.resScaleInput.value = 1.0;
       this.valResScale.textContent = '100%';
@@ -128,6 +142,7 @@ export class SettingsModal {
       this.viewDistSlider.value = 600;
       this.valViewDist.textContent = '600 METERS';
       this.bloomCheckbox.checked = true;
+      if (this.bloomSlider) { this.bloomSlider.value = 0.9; this.valBloom.textContent = 'ON (INTENSITY: 0.9)'; }
     } else if (preset === 'high') {
       this.resScaleInput.value = 1.0;
       this.valResScale.textContent = '100%';
@@ -139,6 +154,7 @@ export class SettingsModal {
       this.viewDistSlider.value = 800;
       this.valViewDist.textContent = '800 METERS';
       this.bloomCheckbox.checked = true;
+      if (this.bloomSlider) { this.bloomSlider.value = 1.15; this.valBloom.textContent = 'ON (INTENSITY: 1.15)'; }
     } else if (preset === 'ultra') {
       this.resScaleInput.value = 1.25;
       this.valResScale.textContent = '125%';
@@ -150,6 +166,7 @@ export class SettingsModal {
       this.viewDistSlider.value = 1200;
       this.valViewDist.textContent = '1200 METERS';
       this.bloomCheckbox.checked = true;
+      if (this.bloomSlider) { this.bloomSlider.value = 1.4; this.valBloom.textContent = 'ON (INTENSITY: 1.4)'; }
     }
   }
 
@@ -177,6 +194,15 @@ export class SettingsModal {
     const viewDist = parseFloat(this.viewDistSlider.value);
     this.game.camera.far = viewDist;
     this.game.camera.updateProjectionMatrix();
+
+    // 7. Bloom post-processing (neon glow)
+    if (this.game.bloomPass) {
+      const bloomOn = this.bloomCheckbox.checked;
+      this.game.bloomPass.enabled = bloomOn;
+      if (this.bloomSlider) {
+        this.game.bloomPass.strength = parseFloat(this.bloomSlider.value);
+      }
+    }
   }
 
   updateStats(fps, renderMs, debrisCount, particlesCount, lightningCount) {

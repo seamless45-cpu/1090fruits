@@ -31,6 +31,65 @@ class SoundSystem {
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.setValueAtTime(0.5, this.ctx.currentTime);
     this.masterGain.connect(this.ctx.destination);
+    this.startAmbientWind();
+  }
+
+  /**
+   * Procedural ambient wind / storm room-tone.
+   * Looped filtered noise with a very slow swell LFO - quiet by design,
+   * sells the "outdoors in a storm arena" feel under all the SFX.
+   */
+  startAmbientWind() {
+    if (!this.ctx || this.ambientStarted) return;
+    this.ambientStarted = true;
+
+    const ctx = this.ctx;
+    const bufferLen = ctx.sampleRate * 4;
+    const buffer = ctx.createBuffer(1, bufferLen, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < bufferLen; i++) {
+      // Pinkish noise (cheap first-order filter of white noise)
+      const white = Math.random() * 2 - 1;
+      last = last * 0.97 + white * 0.03;
+      data[i] = last * 3.0;
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = 420;
+    lowpass.Q.value = 0.6;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0.055;
+
+    // Slow swell LFO so the wind breathes
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.07;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 0.028;
+    lfo.connect(lfoGain);
+    lfoGain.connect(gain.gain);
+
+    // Gentle high-frequency shimmer for gusts
+    const shimmer = ctx.createOscillator();
+    shimmer.frequency.value = 0.19;
+    const shimmerGain = ctx.createGain();
+    shimmerGain.gain.value = 120;
+    shimmer.connect(shimmerGain);
+    shimmerGain.connect(lowpass.frequency);
+
+    src.connect(lowpass);
+    lowpass.connect(gain);
+    gain.connect(this.masterGain);
+
+    src.start();
+    lfo.start();
+    shimmer.start();
   }
 
   toggleMute() {

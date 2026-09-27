@@ -2,14 +2,22 @@ import * as THREE from 'three';
 
 /**
  * 3D 1090 Fruits - Cloud, Weather & Fluid Dynamics Rainshaft System
- * 
+ *
  * SPECIFICATIONS:
- * 1. "visual effects on rain mist is white smoke with fluid dynamics physics 
+ * 1. "visual effects on rain mist is white smoke with fluid dynamics physics
  *     to mimic the appearance of rainshafts and on tornadoes"
- * 2. "note: the rain from clouds required rainshafts that uses realistic smoke effects 
+ * 2. "note: the rain from clouds required rainshafts that uses realistic smoke effects
  *     with fluid dynamics to mimic real rainshafts and microburst."
  * 3. Dynamic Growing Cloud System (Cumulus -> Cumulonimbus -> Supercell)
  * 4. Microburst, Derecho, Squall line, Hurricane, Tornadoes, and Flooding.
+ *
+ * VISUALS:
+ *  - Billboard-sprite cloud puffs (soft radial texture, two-tone shading)
+ *    that darken and bruise purple as they mature into supercells
+ *  - Fluid rainshafts with ground mist rings
+ *  - Tornadoes with a dark debris core
+ *  - Tsunamis with animated white foam crests
+ *  - Flooding plane with gentle surface motion
  */
 
 export class CloudWeatherManager {
@@ -28,6 +36,7 @@ export class CloudWeatherManager {
     this.floodPlane = null;
     this.floodHeight = 0;
     this.floodTargetHeight = 0;
+    this.floodTime = 0;
 
     // Shared particles & textures for fluid smoke rainshafts
     this.initFluidSmokeGeometry();
@@ -47,6 +56,20 @@ export class CloudWeatherManager {
     ctx.fillRect(0, 0, 64, 64);
 
     this.smokeTexture = new THREE.CanvasTexture(canvas);
+
+    // Softer, rounder puff texture for volumetric clouds
+    const cv2 = document.createElement('canvas');
+    cv2.width = 128;
+    cv2.height = 128;
+    const ctx2 = cv2.getContext('2d');
+    const g2 = ctx2.createRadialGradient(64, 64, 4, 64, 64, 62);
+    g2.addColorStop(0, 'rgba(255,255,255,0.75)');
+    g2.addColorStop(0.4, 'rgba(255,255,255,0.35)');
+    g2.addColorStop(0.75, 'rgba(255,255,255,0.12)');
+    g2.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx2.fillStyle = g2;
+    ctx2.fillRect(0, 0, 128, 128);
+    this.puffTexture = new THREE.CanvasTexture(cv2);
   }
 
   /**
@@ -63,7 +86,7 @@ export class CloudWeatherManager {
     for (let i = 0; i < particleCount; i++) {
       // Spawn within top cloud volume
       const angle = Math.random() * Math.PI * 2;
-      const r = Math.random() * (width * 0.5);
+      const r = Math.sqrt(Math.random()) * (width * 0.5);
       positions[i * 3 + 0] = centerPos.x + Math.cos(angle) * r;
       positions[i * 3 + 1] = centerPos.y + (Math.random() * 0.4 + 0.6) * height;
       positions[i * 3 + 2] = centerPos.z + Math.sin(angle) * r;
@@ -80,16 +103,36 @@ export class CloudWeatherManager {
 
     const mat = new THREE.PointsMaterial({
       color: 0xd8e8f8,
-      size: 7.0,
+      size: 3.4,
       map: this.smokeTexture,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.4,
       depthWrite: false,
-      blending: THREE.NormalBlending
+      blending: THREE.NormalBlending,
+      sizeAttenuation: true,
     });
 
     const pSystem = new THREE.Points(geo, mat);
+    pSystem.frustumCulled = false;
     this.scene.add(pSystem);
+
+    // Ground mist: a few big soft sprites where the rain lands
+    const mistSprites = [];
+    const mistCount = 5;
+    for (let i = 0; i < mistCount; i++) {
+      const mMat = new THREE.SpriteMaterial({
+        map: this.puffTexture, color: 0xbcd2e8, transparent: true, opacity: 0.16,
+        depthWrite: false, fog: false,
+      });
+      const sp = new THREE.Sprite(mMat);
+      const a = (i / mistCount) * Math.PI * 2;
+      const r = Math.random() * width * 0.4;
+      sp.position.set(centerPos.x + Math.cos(a) * r, 2.5 + Math.random() * 3, centerPos.z + Math.sin(a) * r);
+      const s = width * (0.25 + Math.random() * 0.2);
+      sp.scale.set(s, s * 0.45, 1);
+      this.scene.add(sp);
+      mistSprites.push(sp);
+    }
 
     this.activeRainshafts.push({
       mesh: pSystem,
@@ -101,7 +144,8 @@ export class CloudWeatherManager {
       height,
       mat,
       elapsed: 0,
-      duration: 12.0
+      duration: 12.0,
+      mistSprites,
     });
   }
 
@@ -143,14 +187,27 @@ export class CloudWeatherManager {
       transparent: true,
       opacity: 0.7,
       depthWrite: false,
-      blending: THREE.NormalBlending
+      blending: THREE.NormalBlending,
     });
 
     const mesh = new THREE.Points(geo, mat);
+    mesh.frustumCulled = false;
     this.scene.add(mesh);
+
+    // Dark debris core (slim inner funnel)
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0x39424e, transparent: true, opacity: 0.85,
+      depthWrite: false, side: THREE.DoubleSide, fog: false,
+    });
+    const coreGeo = new THREE.CylinderGeometry(baseRadius * 2.6, baseRadius * 0.8, height, 16, 1, true);
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.position.set(centerPos.x, height / 2, centerPos.z);
+    this.scene.add(core);
 
     this.activeTornadoes.push({
       mesh,
+      core,
+      coreMat,
       positions,
       particleData,
       count,
@@ -173,9 +230,10 @@ export class CloudWeatherManager {
     const mat = new THREE.MeshBasicMaterial({
       color: 0xc4daed,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.4,
       side: THREE.DoubleSide,
-      depthWrite: false
+      depthWrite: false,
+      blending: THREE.NormalBlending,
     });
     const colMesh = new THREE.Mesh(geo, mat);
     colMesh.position.set(pos.x, 60, pos.z);
@@ -197,30 +255,42 @@ export class CloudWeatherManager {
 
   /**
    * Dynamic Growing Cloud (Cumulus Humilis -> Cumulus Congestus -> Cumulonimbus -> Supercell)
+   * Built from soft billboard puffs with two-tone shading.
    */
   spawnGrowingCloud(pos, isSupercellForced = false, maxRadius = 150) {
     const cloudGroup = new THREE.Group();
     cloudGroup.position.set(pos.x, 90, pos.z);
 
-    // Multi-puff cloud geometry
-    const puffCount = 14;
-    const puffGeo = new THREE.SphereGeometry(18, 8, 8);
-    const puffMat = new THREE.MeshStandardMaterial({
-      color: 0xd8e4f0,
-      roughness: 1.0,
-      transparent: true,
-      opacity: 0.85
+    const puffCount = 16;
+    const puffSpriteMatLight = new THREE.SpriteMaterial({
+      map: this.puffTexture, color: 0xe8f1fa, transparent: true, opacity: 0.65,
+      depthWrite: false, fog: false,
+    });
+    const puffSpriteMatDark = new THREE.SpriteMaterial({
+      map: this.puffTexture, color: 0x8b97a8, transparent: true, opacity: 0.55,
+      depthWrite: false, fog: false,
     });
 
+    const puffs = [];
     for (let i = 0; i < puffCount; i++) {
-      const puff = new THREE.Mesh(puffGeo, puffMat);
-      puff.position.set(
-        (Math.random() - 0.5) * 50,
-        (Math.random() - 0.5) * 20,
-        (Math.random() - 0.5) * 50
-      );
-      puff.scale.set(1 + Math.random(), 0.7 + Math.random() * 0.5, 1 + Math.random());
-      cloudGroup.add(puff);
+      const x = (Math.random() - 0.5) * 70;
+      const y = (Math.random() - 0.5) * 26;
+      const z = (Math.random() - 0.5) * 70;
+      const s = 26 + Math.random() * 30;
+
+      // Bright upper puff
+      const sp = new THREE.Sprite(puffSpriteMatLight);
+      sp.position.set(x, y + 4, z);
+      sp.scale.set(s, s * (0.6 + Math.random() * 0.4), 1);
+      cloudGroup.add(sp);
+      puffs.push(sp);
+
+      // Darker base puff (underbelly shading)
+      const sp2 = new THREE.Sprite(puffSpriteMatDark);
+      sp2.position.set(x, y - 7, z);
+      sp2.scale.set(s * 1.15, s * 0.5, 1);
+      cloudGroup.add(sp2);
+      puffs.push(sp2);
     }
 
     this.scene.add(cloudGroup);
@@ -236,7 +306,9 @@ export class CloudWeatherManager {
       isSupercell: isSupercellForced || (Math.random() < 0.35),
       lightningTimer: 0,
       rainshaftActive: false,
-      maxRadius
+      maxRadius,
+      matLight: puffSpriteMatLight,
+      matDark: puffSpriteMatDark,
     };
 
     this.activeClouds.push(cloudData);
@@ -244,30 +316,60 @@ export class CloudWeatherManager {
   }
 
   /**
-   * Spawns Quake Tsunami Wave Wall
+   * Spawns Quake Tsunami Wave Wall with a white foam crest
    */
   spawnTsunami(originPos, direction, width = 60, height = 15, speed = 40, isLarge = false) {
-    const geo = new THREE.BoxGeometry(width, height, 8);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x0088cc,
-      roughness: 0.3,
-      metalness: 0.2,
+    const group = new THREE.Group();
+
+    // Main water body
+    const waterMat = new THREE.MeshStandardMaterial({
+      color: 0x0a4a7a,
+      roughness: 0.25,
+      metalness: 0.3,
       transparent: true,
-      opacity: 0.75,
-      emissive: 0x002244
+      opacity: 0.8,
+      emissive: 0x001a33,
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.copy(originPos);
-    mesh.position.y = height * 0.5;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, 8), waterMat);
+    group.add(mesh);
+
+    // Foam crest (thin white glowing band on top)
+    const foamMat = new THREE.MeshBasicMaterial({
+      color: 0xd8f4ff, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+    });
+    const foam = new THREE.Mesh(new THREE.BoxGeometry(width * 1.02, height * 0.22, 9), foamMat);
+    foam.position.y = height * 0.45;
+    group.add(foam);
+
+    // Side spray wisps
+    const sprayMat = new THREE.SpriteMaterial({
+      map: this.puffTexture, color: 0xcfeaff, transparent: true, opacity: 0.4,
+      depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+    });
+    for (let i = 0; i < 4; i++) {
+      const sp = new THREE.Sprite(sprayMat);
+      const a = (i / 4) * Math.PI * 2;
+      sp.position.set(Math.cos(a) * width * 0.3, height * 0.5 + Math.random() * 3, Math.sin(a) * 5);
+      const s = 8 + Math.random() * 10;
+      sp.scale.set(s, s * 0.5, 1);
+      group.add(sp);
+    }
+
+    group.position.copy(originPos);
+    group.position.y = height * 0.5;
 
     // Orient towards direction
     const lookTarget = originPos.clone().add(direction);
-    mesh.lookAt(lookTarget);
+    group.lookAt(lookTarget.x, group.position.y, lookTarget.z);
 
-    this.scene.add(mesh);
+    this.scene.add(group);
 
     this.activeTsunamis.push({
-      mesh,
+      mesh: group,
+      waterMat,
+      foamMat,
+      foam,
       direction: direction.clone().normalize(),
       speed: speed * (isLarge ? 0.9 : 1.1),
       height,
@@ -275,7 +377,7 @@ export class CloudWeatherManager {
       isLarge,
       duration: 8.0,
       elapsed: 0,
-      mat
+      animSeed: Math.random() * 10,
     });
   }
 
@@ -284,17 +386,19 @@ export class CloudWeatherManager {
    */
   startNimbostratusFlood(duration = 20) {
     if (!this.floodPlane) {
-      const geo = new THREE.PlaneGeometry(1600, 1600);
+      const geo = new THREE.PlaneGeometry(1600, 1600, 32, 32);
       geo.rotateX(-Math.PI / 2);
       const mat = new THREE.MeshStandardMaterial({
         color: 0x0a2b42,
-        roughness: 0.1,
-        metalness: 0.8,
+        roughness: 0.12,
+        metalness: 0.75,
         transparent: true,
-        opacity: 0.65
+        opacity: 0.62,
+        emissive: 0x00121e,
       });
       this.floodPlane = new THREE.Mesh(geo, mat);
       this.floodPlane.position.set(0, -1, 0);
+      this.floodPlaneBaseY = -1;
       this.scene.add(this.floodPlane);
     }
     this.floodTargetHeight = 3.5; // Water rises to 3.5m
@@ -309,9 +413,17 @@ export class CloudWeatherManager {
       if (rs.elapsed >= rs.duration) {
         this.scene.remove(rs.mesh);
         rs.mat.dispose();
+        for (const m of rs.mistSprites) {
+          this.scene.remove(m);
+          m.material.dispose();
+        }
         this.activeRainshafts.splice(i, 1);
         continue;
       }
+
+      // Fade in/out over lifetime
+      const lifeT = rs.elapsed / rs.duration;
+      rs.mat.opacity = 0.4 * Math.min(1, lifeT * 5) * Math.min(1, (1 - lifeT) * 4);
 
       const posAttr = rs.mesh.geometry.attributes.position;
       const arr = posAttr.array;
@@ -327,13 +439,20 @@ export class CloudWeatherManager {
         if (arr[j * 3 + 1] <= 0.2) {
           // Reset back to cloud top
           const angle = Math.random() * Math.PI * 2;
-          const r = Math.random() * (rs.width * 0.5);
+          const r = Math.sqrt(Math.random()) * (rs.width * 0.5);
           arr[j * 3 + 0] = rs.centerPos.x + Math.cos(angle) * r;
           arr[j * 3 + 1] = rs.centerPos.y + (Math.random() * 0.3 + 0.7) * rs.height;
           arr[j * 3 + 2] = rs.centerPos.z + Math.sin(angle) * r;
         }
       }
       posAttr.needsUpdate = true;
+
+      // Mist drift
+      for (let m = 0; m < rs.mistSprites.length; m++) {
+        const sp = rs.mistSprites[m];
+        sp.position.x += Math.sin(rs.elapsed * 0.4 + m * 2) * dt * 2;
+        sp.material.opacity = 0.16 * Math.min(1, lifeT * 5) * Math.min(1, (1 - lifeT) * 4);
+      }
     }
 
     // 2. Update Tornadoes (swirl & enemy suction)
@@ -343,7 +462,9 @@ export class CloudWeatherManager {
 
       if (tn.elapsed >= tn.duration) {
         this.scene.remove(tn.mesh);
+        this.scene.remove(tn.core);
         tn.mat.dispose();
+        tn.coreMat.dispose();
         this.activeTornadoes.splice(i, 1);
         continue;
       }
@@ -363,6 +484,13 @@ export class CloudWeatherManager {
         arr[j * 3 + 2] = tn.centerPos.z + Math.sin(pd.angle) * curR;
       }
       tn.mesh.geometry.attributes.position.needsUpdate = true;
+
+      // Slowly drift the funnel sideways
+      tn.centerPos.x += Math.sin(tn.elapsed * 0.5) * dt * 3;
+      tn.centerPos.z += Math.cos(tn.elapsed * 0.4) * dt * 3;
+      tn.core.position.x = tn.centerPos.x;
+      tn.core.position.z = tn.centerPos.z;
+      tn.core.rotation.y += dt * 2.5;
 
       // Enemy suction towards tornado vortex center
       const suckRadius = 60.0;
@@ -384,8 +512,17 @@ export class CloudWeatherManager {
 
       if (cl.elapsed >= cl.lifeDuration) {
         this.scene.remove(cl.group);
+        cl.matLight.dispose();
+        cl.matDark.dispose();
         this.activeClouds.splice(i, 1);
         continue;
+      }
+
+      // Fade out during last 15% of life
+      if (cl.elapsed > cl.lifeDuration * 0.85) {
+        const ft = (cl.lifeDuration - cl.elapsed) / (cl.lifeDuration * 0.15);
+        cl.matLight.opacity = 0.65 * ft;
+        cl.matDark.opacity = 0.55 * ft;
       }
 
       // Dynamic growth over first 10 seconds
@@ -406,6 +543,15 @@ export class CloudWeatherManager {
         }
       }
 
+      // Color evolution: bright cumulus -> bruised purple supercell
+      if (cl.stage === 'supercell') {
+        cl.matLight.color.setHex(0x9a92b8);
+        cl.matDark.color.setHex(0x4a4066);
+      } else if (cl.stage === 'cumulonimbus') {
+        cl.matLight.color.setHex(0xc3cddb);
+        cl.matDark.color.setHex(0x66707f);
+      }
+
       // Lightning generation from mature clouds
       if (cl.stage === 'cumulonimbus' || cl.stage === 'supercell') {
         cl.lightningTimer += dt;
@@ -423,6 +569,10 @@ export class CloudWeatherManager {
           this.explosions.createExplosion(strikePos, isHyperbolt ? 16 : 8, 'lightning', isHyperbolt ? 3.0 : 1.2);
         }
       }
+
+      // Gentle horizontal drift
+      cl.group.position.x += Math.sin(cl.elapsed * 0.1) * dt * 1.5;
+      cl.group.position.z += Math.cos(cl.elapsed * 0.08) * dt * 1.5;
     }
 
     // 4. Update Tsunamis
@@ -432,13 +582,18 @@ export class CloudWeatherManager {
 
       if (ts.elapsed >= ts.duration) {
         this.scene.remove(ts.mesh);
-        ts.mat.dispose();
+        ts.waterMat.dispose();
+        ts.foamMat.dispose();
         this.activeTsunamis.splice(i, 1);
         continue;
       }
 
       // Move along direction vector
       ts.mesh.position.addScaledVector(ts.direction, ts.speed * dt);
+
+      // Crest bob + foam shimmer
+      ts.mesh.position.y = ts.height * 0.5 + Math.sin(ts.elapsed * 3 + ts.animSeed) * 0.8;
+      ts.foamMat.opacity = 0.65 + 0.25 * Math.sin(ts.elapsed * 9 + ts.animSeed);
 
       // Hit enemies
       for (const enemy of enemyList) {
@@ -451,12 +606,13 @@ export class CloudWeatherManager {
       }
     }
 
-    // 5. Update Flooding Height
+    // 5. Update Flooding Height (with gentle surface motion)
     if (this.floodPlane) {
+      this.floodTime += dt;
       if (this.floodHeight < this.floodTargetHeight) {
         this.floodHeight += dt * 0.4;
-        this.floodPlane.position.y = this.floodHeight;
       }
+      this.floodPlane.position.y = this.floodHeight + Math.sin(this.floodTime * 0.8) * 0.15;
     }
   }
 }

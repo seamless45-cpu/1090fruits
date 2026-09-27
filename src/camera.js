@@ -2,18 +2,25 @@ import * as THREE from 'three';
 
 /**
  * 3D 1090 Fruits - Camera & Shake Controller
- * 
+ *
  * SPECIFICATIONS:
  * 1. Camera Zooming: Max range 300 meters. (Accurate 3.0m - 300.0m range)
- * 2. Camera zoom compatibility: PC (wheel, keys), Mobile (pinch gestures, slider), 
+ * 2. Camera zoom compatibility: PC (wheel, keys), Mobile (pinch gestures, slider),
  *    Console (gamepad right stick/triggers), Laptop (trackpad), TV (UI buttons).
  * 3. Camera Shake Effect:
- *    - Strictly high-frequency random positional offsets ONLY on X, Y, and Z axes.
- *    - DO NOT apply any rotational shake (pitch, yaw, roll = 0).
- *    - Rotational camera movement is intentionally disabled to preserve visual clarity,
- *      prevent disorientation, and keep aiming perfectly steady.
- *    - Closer explosion -> stronger positional displacement; farther explosion -> weaker displacement.
+ *    - STRICTLY AXIAL: high-frequency random positional offsets ONLY on the X, Y and Z
+ *      axes. The camera's orientation (pitch / yaw / roll) is FROZEN for the duration
+ *      of each shaken frame - it is computed once from the un-shaken base pose and is
+ *      never modified by the shake.
+ *    - Implementation guarantee: camera.position = basePos + axialOffset
+ *      camera.quaternion  = baseQuaternion (unchanged by shake)
+ *      -> zero rotational shake, zero aiming drift, by construction.
+ *    - Closer explosion -> stronger positional displacement; farther -> weaker.
  */
+
+// Absolute ceiling for a single shake source (meters). Keeps cataclysmic skills
+// (intensity 60+) playable while still feeling violent.
+const SHAKE_HARD_CAP = 9.0;
 
 export class CameraController {
   constructor(camera, domElement) {
@@ -47,13 +54,18 @@ export class CameraController {
     this.touchPinchStartDist = 0;
     this.isPinching = false;
 
-    // Camera Shake System (TRANSLATIONAL ONLY: X, Y, Z)
+    // Camera Shake System (STRICTLY AXIAL: translation on X / Y / Z only)
     this.shakeList = [];
-    this.shakeOffset = new THREE.Vector3(0, 0, 0);
     this.shakeScale = 1.0; // Configurable from graphics settings
 
-    // Stored base position & rotation for rigid shake application
+    // Stored base pose for rigid axial shake application
     this.baseCameraPos = new THREE.Vector3();
+    this.baseQuaternion = new THREE.Quaternion();
+
+    // Reusable temp vectors (zero per-frame allocation)
+    this._localOffset = new THREE.Vector3();
+    this._worldOffset = new THREE.Vector3();
+    this._tmp = new THREE.Vector3();
 
     // Bind event listeners
     this.initEventListeners();
@@ -203,13 +215,14 @@ export class CameraController {
   }
 
   /**
-   * Add a positional camera shake event.
+   * Add an AXIAL camera shake event (translation on X/Y/Z only).
+   *
    * STRICT REQUIREMENTS:
-   * - High-frequency random positional offsets only on X, Y, Z axes.
-   * - ZERO rotational shake (pitch, yaw, roll = 0).
-   * - Closer explosion -> stronger positional displacement.
-   * - Farther explosion -> weaker displacement.
-   * 
+   * - High-frequency random positional offsets only on the X, Y, Z axes.
+   * - ZERO rotational shake: the camera quaternion is locked to the un-shaken
+   *   base pose; the shake may only displace camera.position.
+   * - Closer explosion -> stronger displacement, farther -> weaker.
+   *
    * @param {THREE.Vector3|null} explosionOrigin - 3D world position of the explosion. If null, applies global shake.
    * @param {number} baseIntensity - Base shake magnitude in meters (e.g. 0.5 - 3.5).
    * @param {number} duration - Shake duration in seconds.
@@ -221,22 +234,26 @@ export class CameraController {
     if (explosionOrigin) {
       // Calculate distance between camera/player and explosion origin in accurate meters
       const dist = this.targetPosition.distanceTo(explosionOrigin);
-      // Falloff curve: 1 / (1 + (dist / 25)^1.2)
+      // Falloff curve: 1 / (1 + (dist / 22)^1.4)
       // Closer explosion -> massive displacement, far explosion -> faint tremor
       const falloff = 1.0 / (1.0 + Math.pow(dist / 22.0, 1.4));
       effectiveIntensity *= falloff;
     }
 
+    // Hard cap so catastrophic skills remain playable
+    effectiveIntensity = Math.min(effectiveIntensity, SHAKE_HARD_CAP);
     if (effectiveIntensity < 0.005) return; // Discard imperceptible vibrations
 
     this.shakeList.push({
-      intensity: effectiveIntensity,
       initialIntensity: effectiveIntensity,
       duration: duration,
       elapsed: 0,
       frequency: frequency,
-      lastCycle: 0,
-      currentOffset: new THREE.Vector3(0, 0, 0),
+      cycleTimer: 0,
+      // Smoothed axial offset in the camera's LOCAL X/Y/Z frame
+      cur: new THREE.Vector3(0, 0, 0),
+      // Target the smoothed value chases (re-rolled every cycle)
+      goal: new THREE.Vector3(0, 0, 0),
     });
   }
 
@@ -320,9 +337,20 @@ export class CameraController {
     }
 
     // -------------------------------------------------------------
-    // UPDATE CAMERA SHAKE (Strictly X, Y, Z translation only)
+    // STEP 1 - BASE POSE (un-shaken). Position AND orientation are
+    // derived here, exactly once, from the clean base state.
     // -------------------------------------------------------------
-    this.shakeOffset.set(0, 0, 0);
+    this.camera.position.copy(this.baseCameraPos);
+    this.camera.lookAt(this.smoothedTarget);
+    this.baseQuaternion.copy(this.camera.quaternion);
+
+    // -------------------------------------------------------------
+    // STEP 2 - AXIAL SHAKE (X / Y / Z translation ONLY).
+    // Every offset is produced in the camera's local axis frame and
+    // added to position. The quaternion captured in STEP 1 is
+    // NEVER touched -> rotation is provably zero from the shake.
+    // -------------------------------------------------------------
+    this._localOffset.set(0, 0, 0);
 
     for (let i = this.shakeList.length - 1; i >= 0; i--) {
       const s = this.shakeList[i];
@@ -333,32 +361,46 @@ export class CameraController {
         continue;
       }
 
-      // Exponential decay
+      // Combined envelope: fast initial "thump" + long exponential tail
       const progress = s.elapsed / s.duration;
-      const decay = Math.pow(1.0 - progress, 2.0);
-      const curIntensity = s.initialIntensity * decay;
+      const thump = Math.exp(-s.elapsed * 3.2);
+      const tail = Math.pow(1.0 - progress, 1.6);
+      const curIntensity = s.initialIntensity * (0.45 * thump + 0.55 * tail);
 
-      // High-frequency jitter update
+      // High-frequency re-roll of the axial target (random walk on axes)
+      s.cycleTimer += deltaTime;
       const cycleTime = 1.0 / s.frequency;
-      if (s.elapsed - s.lastCycle > cycleTime) {
-        s.lastCycle = s.elapsed;
-        // Generate uniform random offsets strictly in X, Y, Z translation
-        s.currentOffset.set(
-          (Math.random() - 0.5) * 2.0 * curIntensity,
-          (Math.random() - 0.5) * 2.0 * curIntensity,
-          (Math.random() - 0.5) * 2.0 * curIntensity
+      if (s.cycleTimer >= cycleTime) {
+        s.cycleTimer = 0;
+        // Uniform random displacement strictly along local X, Y, Z
+        s.goal.set(
+          (Math.random() * 2 - 1) * curIntensity,
+          (Math.random() * 2 - 1) * curIntensity * 0.85,
+          (Math.random() * 2 - 1) * curIntensity
         );
       }
 
-      this.shakeOffset.add(s.currentOffset);
+      // Critically-damped follow: keeps the jitter high-frequency but organic
+      const follow = 1.0 - Math.exp(-deltaTime * 45.0);
+      s.cur.lerp(s.goal, follow);
+
+      this._localOffset.add(s.cur);
     }
 
-    // 1. Position camera at base position + pure XYZ translational offset
-    this.camera.position.copy(this.baseCameraPos).add(this.shakeOffset);
+    // -------------------------------------------------------------
+    // STEP 3 - COMMIT: translate position only. Orientation stays
+    // locked to the frozen base quaternion (no pitch/yaw/roll).
+    // -------------------------------------------------------------
+    if (this._localOffset.lengthSq() > 0) {
+      this._worldOffset.copy(this._localOffset).applyQuaternion(this.baseQuaternion);
+      this.camera.position.add(this._worldOffset);
+    }
 
-    // 2. Point camera at smoothed target.
-    // Notice: we DO NOT add any roll, pitch, or yaw angular jitter!
-    // The rotation is determined SOLELY by lookAt(smoothedTarget).
-    this.camera.lookAt(this.smoothedTarget);
+    // Safety: keep the shaken camera above the ground plane.
+    // This is still a pure translation correction (X/Y/Z only).
+    if (this.camera.position.y < 0.15) {
+      const push = 0.15 - this.camera.position.y;
+      this.camera.position.y += push;
+    }
   }
 }

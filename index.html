@@ -14,6 +14,9 @@
   <!-- 3D Canvas Container -->
   <div id="canvas-container"></div>
 
+  <!-- Cinematic vignette + edge glow overlay (pure CSS, pointer-transparent) -->
+  <div id="vignette" class="vignette-overlay"></div>
+
   <!-- Sci-Fi HUD Overlay (No Scanlines) -->
   <div id="hud" class="hud-overlay">
     
@@ -363,6 +366,8 @@
             <input type="checkbox" id="opt-bloom-toggle" checked />
             <span>ENABLE NEON POST-PROCESSING BLOOM</span>
           </label>
+          <input type="range" class="sci-slider" id="opt-bloom-intensity" min="0.2" max="2.0" step="0.05" value="1.15" />
+          <small class="setting-desc">Bloom intensity for neon grid, lightning, plasma cores and energy rings. Higher = more cinematic glow, lower = crisper edges.</small>
         </div>
 
         <!-- Max View Distance -->

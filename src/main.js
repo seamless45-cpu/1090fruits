@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CameraController } from './camera.js';
 import { sound } from './audio.js';
 import { LightningManager } from './effects/lightning.js';
@@ -14,15 +18,19 @@ import { SupercellPickerModal } from './ui/supercell_picker.js';
 
 /**
  * 3D 1090 Fruits - Core Game Engine
+ *
+ * RENDER PIPELINE:
+ *  - ACES filmic tone mapping + sRGB output for a cinematic HDR look
+ *  - EffectComposer with UnrealBloom for neon glow (toggleable in Graphics)
+ *  - Cinematic arena environment (sky, stars, moon, dust, pylons)
  */
-class GameEngine {
+export class GameEngine {
   constructor() {
     this.container = document.getElementById('canvas-container');
 
     // 1. Three.js Scene, Camera, Renderer
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x060a12);
-    this.scene.fog = new THREE.FogExp2(0x060a12, 0.0018);
+    this.scene.fog = new THREE.FogExp2(0x0a1420, 0.0016);
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(58, aspect, 0.2, 1200);
@@ -36,7 +44,26 @@ class GameEngine {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Cinematic tone mapping (applied by OutputPass at the end of the composer)
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
     this.container.appendChild(this.renderer.domElement);
+
+    // 1b. Post-processing: neon bloom
+    this.composer = new EffectComposer(this.renderer);
+    this.renderPass = new RenderPass(this.scene, this.camera);
+    this.composer.addPass(this.renderPass);
+
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      1.15,   // strength
+      0.55,   // radius
+      0.72    // threshold
+    );
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
+    this.bloomPass.enabled = true;
 
     // 2. Audio & Camera Controllers
     this.sound = sound;
@@ -52,7 +79,7 @@ class GameEngine {
 
     // 5. Player & Combat Entities
     this.player = new Player(this.scene, this.sound);
-    this.enemies = new EnemyManager(this.scene);
+    this.enemies = new EnemyManager(this.scene, this.explosions);
 
     // Active Equipment State (Strictly separated fruit & sword)
     this.equippedFruit = 'gravity';
@@ -94,6 +121,7 @@ class GameEngine {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
     });
 
     // Track mouse position for floor raycast
@@ -104,8 +132,8 @@ class GameEngine {
 
     // Left Click in 3D world executes M1 attack
     window.addEventListener('click', (e) => {
-      if (e.target.closest('#hud button') || 
-          e.target.closest('.sci-modal-card') || 
+      if (e.target.closest('#hud button') ||
+          e.target.closest('.sci-modal-card') ||
           e.target.closest('.skill-item-bar') ||
           e.target.closest('.inventory-slot') ||
           e.target.closest('.zoom-controls-overlay') ||
@@ -208,7 +236,8 @@ class GameEngine {
   }
 
   setResolutionScale(scale) {
-    this.renderer.setPixelRatio(window.devicePixelRatio * scale);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio * scale, 2.5));
+    this.composer.setPixelRatio(Math.min(window.devicePixelRatio * scale, 2.5));
   }
 
   equipFruit(fruitId) {
@@ -247,22 +276,40 @@ class GameEngine {
   }
 
   spawnFirepit(centerPos, radius = 25.0, duration = 10.0, tickPct = 0.03) {
-    const geo = new THREE.CircleGeometry(radius, 32);
+    // Layered firepit: hot core + flickering outer glow + rising ember column
+    const coreGeo = new THREE.CircleGeometry(radius * 0.75, 32);
+    coreGeo.rotateX(-Math.PI / 2);
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xff7722, transparent: true, opacity: 0.7,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.position.copy(centerPos);
+    core.position.y = 0.12;
+    this.scene.add(core);
+
+    const geo = new THREE.RingGeometry(radius * 0.78, radius, 40);
     geo.rotateX(-Math.PI / 2);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xff3300,
-      transparent: true,
-      opacity: 0.55,
-      side: THREE.DoubleSide,
-      depthWrite: false
+      color: 0xff3300, transparent: true, opacity: 0.5,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
     });
     const disc = new THREE.Mesh(geo, mat);
     disc.position.copy(centerPos);
-    disc.position.y = 0.12;
+    disc.position.y = 0.14;
     this.scene.add(disc);
+
+    // Dynamic light for the pit
+    const light = new THREE.PointLight(0xff5511, 1.8, radius * 2.2, 1.9);
+    light.position.copy(centerPos);
+    light.position.y = 3;
+    this.scene.add(light);
 
     this.activeHazards.push({
       mesh: disc,
+      coreMesh: core,
+      coreMat,
+      light,
       center: centerPos.clone(),
       radius,
       duration,
@@ -506,6 +553,9 @@ class GameEngine {
     this.explosions.update(dt);
     this.weather.update(dt, this.enemies.enemies, this.player.position);
 
+    // 5b. Animated environment (sky, core, pylons, dust, rings)
+    this.arena.update(dt, this.camera);
+
     // 6. Update Active Floor Hazards (Firepits / Lava pits)
     for (let i = this.activeHazards.length - 1; i >= 0; i--) {
       const h = this.activeHazards[i];
@@ -514,10 +564,19 @@ class GameEngine {
 
       if (h.elapsed >= h.duration) {
         this.scene.remove(h.mesh);
+        this.scene.remove(h.coreMesh);
+        this.scene.remove(h.light);
         h.mat.dispose();
+        h.coreMat.dispose();
         this.activeHazards.splice(i, 1);
         continue;
       }
+
+      // Flicker the firepit glow
+      const flicker = 0.75 + 0.25 * Math.sin(h.elapsed * 11 + h.center.x);
+      h.mat.opacity = 0.5 * flicker * Math.min(1, (h.duration - h.elapsed) * 2);
+      h.coreMat.opacity = 0.7 * flicker * Math.min(1, (h.duration - h.elapsed) * 2);
+      h.light.intensity = 1.8 * flicker * Math.min(1, (h.duration - h.elapsed));
 
       // Tick damage to enemies inside hazard
       if (h.tickTimer >= 0.5) {
@@ -534,8 +593,8 @@ class GameEngine {
     this.skillBar.update(dt);
     this.updateHUDValues();
 
-    // 8. Render Scene
-    this.renderer.render(this.scene, this.camera);
+    // 8. Render Scene (through the bloom composer)
+    this.composer.render();
 
     const renderMs = performance.now() - startTime;
 

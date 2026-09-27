@@ -1,6 +1,8 @@
+import * as THREE from 'three';
+
 /**
  * 3D 1090 Fruits - Supercell Spawner Modal UI (Cloud Skill 9)
- * 
+ *
  * Allows player to choose a type of supercell:
  * 1. LP (Low Precipitation) Supercell (lowest precip, lowest damage, 2.5x faster cooldown, 300m size)
  * 2. Normal Supercell (500m size)
