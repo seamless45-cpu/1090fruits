@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>3D 1090 Fruits</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body class="sci-fi-theme">
+  <!-- 3D Canvas Container -->
+  <div id="canvas-container"></div>
+
+  <!-- Sci-Fi HUD Overlay (No Scanlines) -->
+  <div id="hud" class="hud-overlay">
+    
+    <!-- Top Bar: Player Telemetry & Status -->
+    <header class="top-bar">
+      <div class="player-vital-card">
+        <div class="vital-header">
+          <div class="pilot-tag">
+            <span class="status-dot pulse-cyan"></span>
+            <span class="pilot-id">OPERATIVE // 1090</span>
+            <span class="fruit-badge" id="hud-fruit-name">GRAVITY</span>
+          </div>
+          <div class="range-readout" id="reticle-range">RANGE: -- M</div>
+        </div>
+
+        <div class="bars-container">
+          <!-- HP Bar -->
+          <div class="bar-row">
+            <span class="bar-label">HP</span>
+            <div class="bar-track hp-track">
+              <div class="bar-fill hp-fill" id="player-hp-bar" style="width: 100%;"></div>
+            </div>
+            <span class="bar-val" id="player-hp-text">1000 / 1000</span>
+          </div>
+
+          <!-- Energy/Charge Bar -->
+          <div class="bar-row">
+            <span class="bar-label">EN</span>
+            <div class="bar-track en-track">
+              <div class="bar-fill en-fill" id="player-en-bar" style="width: 100%;"></div>
+            </div>
+            <span class="bar-val" id="player-en-text">100%</span>
+          </div>
+
+          <!-- Special Charge / Superpower state (e.g. Gravity Blade Charge, Ice Bombard, Hell Fury) -->
+          <div class="bar-row" id="special-bar-row" style="display: none;">
+            <span class="bar-label" id="special-bar-label">BOOST</span>
+            <div class="bar-track special-track">
+              <div class="bar-fill special-fill" id="player-special-bar" style="width: 0%;"></div>
+            </div>
+            <span class="bar-val" id="player-special-text">0%</span>
+          </div>
+        </div>
+
+        <!-- Active Buffs row -->
+        <div class="buffs-row" id="buffs-container"></div>
+      </div>
+
+      <!-- Top Center: Target Crosshair Meter Info -->
+      <div class="target-telemetry" id="target-telemetry">
+        <div class="target-reticle-box">
+          <svg class="reticle-svg" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="30" stroke="rgba(0, 240, 255, 0.4)" stroke-width="1.5" fill="none" stroke-dasharray="4, 4"/>
+            <circle cx="50" cy="50" r="12" stroke="rgba(0, 240, 255, 0.8)" stroke-width="1.5" fill="none"/>
+            <line x1="50" y1="20" x2="50" y2="35" stroke="#00f0ff" stroke-width="2"/>
+            <line x1="50" y1="65" x2="50" y2="80" stroke="#00f0ff" stroke-width="2"/>
+            <line x1="20" y1="50" x2="35" y2="50" stroke="#00f0ff" stroke-width="2"/>
+            <line x1="65" y1="50" x2="80" y2="50" stroke="#00f0ff" stroke-width="2"/>
+            <circle cx="50" cy="50" r="2" fill="#00f0ff"/>
+          </svg>
+          <div class="telemetry-info">
+            <span id="target-name">AIM: TERRAIN</span>
+            <span id="target-distance">0.0 M</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top Right: System Menu & Spawner & Graphics Settings -->
+      <div class="top-actions">
+        <button id="btn-spawner" class="sci-btn btn-sm" title="Combat Arena Spawner">
+          <span class="btn-icon">⚡</span>
+          <span class="btn-text">SPAWNER</span>
+        </button>
+        <button id="btn-audio" class="sci-btn btn-sm" title="Toggle SFX Audio">
+          <span class="btn-icon" id="audio-icon">🔊</span>
+          <span class="btn-text" id="audio-text">SFX ON</span>
+        </button>
+        <button id="btn-settings" class="sci-btn btn-sm sci-btn-accent" title="Advanced Graphics Settings">
+          <span class="btn-icon">⚙</span>
+          <span class="btn-text">GRAPHICS</span>
+        </button>
+        <button id="btn-help" class="sci-btn btn-sm" title="Controls & Skill Guides">
+          <span class="btn-icon">?</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Enemy Spawner Floating Control (Collapsible) -->
+    <div id="spawner-panel" class="sci-panel spawner-panel-box" style="display: none;">
+      <div class="panel-header">
+        <span class="panel-title">SIMULATION SPAWNER</span>
+        <button class="panel-close-btn" id="close-spawner">✕</button>
+      </div>
+      <div class="spawner-grid">
+        <button class="sci-btn btn-action" id="spawn-dummy">+ DUMMY (2500 HP)</button>
+        <button class="sci-btn btn-action" id="spawn-drones">+ 5 DRONES (800 HP)</button>
+        <button class="sci-btn btn-action" id="spawn-elites">+ 2 ELITE MECHS (6500 HP)</button>
+        <button class="sci-btn btn-danger" id="spawn-boss">⚠️ TITAN BOSS (35000 HP)</button>
+        <button class="sci-btn btn-subtle" id="clear-enemies">CLEAR ALL TARGETS</button>
+        <div class="auto-spawn-toggle">
+          <label>
+            <input type="checkbox" id="auto-respawn-toggle" checked />
+            <span>AUTO-RESPAWN WAVE</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Screen Flash Overlay for Snow / Quake / Lightning / Alarm -->
+    <div id="screen-flash" class="screen-flash-layer"></div>
+
+    <!-- Middle Right: Compact Skill Casting Panel -->
+    <div id="skill-panel" class="skill-panel-container">
+      <div class="skill-panel-header">
+        <div class="panel-title-group">
+          <span class="skill-source-tag" id="skill-source-tag">GRAVITY FRUIT</span>
+          <div class="mode-toggle-group">
+            <button class="mode-tab active" id="tab-fruit-skills">FRUIT</button>
+            <button class="mode-tab" id="tab-sword-skills">SWORD</button>
+          </div>
+        </div>
+        <button class="collapse-toggle-btn" id="toggle-skill-panel" title="Minimize / Expand Skill Bar">
+          <span id="collapse-icon">▶</span>
+        </button>
+      </div>
+
+      <!-- The dynamic compact skill list -->
+      <div class="skill-list" id="skill-list-container">
+        <!-- Rendered dynamically matching exact skills of equipped fruit or weapon -->
+      </div>
+    </div>
+
+    <!-- Left Controls / Zoom Controls (for Touch / TV / Mobile / Console) -->
+    <div class="zoom-controls-overlay">
+      <div class="zoom-indicator-box">
+        <span class="zoom-label">ZOOM</span>
+        <span class="zoom-meter" id="zoom-meter-text">25.0 M</span>
+      </div>
+      <div class="zoom-buttons-col">
+        <button class="sci-btn btn-icon-round" id="btn-zoom-in" title="Zoom In (+)">+</button>
+        <input type="range" id="zoom-slider" min="3" max="300" step="1" value="25" orient="vertical" title="Camera Range (3m - 300m)" />
+        <button class="sci-btn btn-icon-round" id="btn-zoom-out" title="Zoom Out (-)">-</button>
+      </div>
+    </div>
+
+    <!-- Mobile Action Controls (M1 melee/fire, Dash, Jump) -->
+    <div class="mobile-action-bar" id="mobile-action-bar">
+      <button class="mobile-btn m1-btn" id="btn-mobile-m1">
+        <span class="m1-icon">⚔</span>
+        <span class="m1-label">M1 ATTACK</span>
+      </button>
+      <button class="mobile-btn gun-btn" id="btn-mobile-gun" style="display: none;">
+        <span class="m1-icon">🎯</span>
+        <span class="m1-label">FIRE GUN</span>
+      </button>
+      <button class="mobile-btn dash-btn" id="btn-mobile-dash">
+        <span class="m1-icon">⚡</span>
+        <span class="m1-label">DASH</span>
+      </button>
+    </div>
+
+    <!-- Bottom Down: Square Horizontal Inventory Slots -->
+    <footer class="bottom-inventory-bar">
+      <div class="inventory-slots-row">
+        <!-- Slot 1: Equipped Fruit -->
+        <div class="inventory-slot" id="slot-fruit" title="Equipped Skill Fruit (Click to change)">
+          <div class="slot-badge">FRUIT [1]</div>
+          <div class="slot-icon-wrapper" id="fruit-icon-wrapper">
+            <div class="slot-icon-glyph fruit-glyph" id="fruit-glyph">🌌</div>
+          </div>
+          <div class="slot-details">
+            <span class="slot-name" id="inv-fruit-name">GRAVITY</span>
+            <span class="slot-sub" id="inv-fruit-type">6 SKILLS</span>
+          </div>
+          <button class="slot-action-btn" id="btn-open-fruit-modal">CHANGE</button>
+        </div>
+
+        <!-- Slot 2: Equipped Sword / Melee Weapon -->
+        <div class="inventory-slot" id="slot-sword" title="Equipped Sword Weapon (Click to change)">
+          <div class="slot-badge">SWORD [2]</div>
+          <div class="slot-icon-wrapper" id="sword-icon-wrapper">
+            <div class="slot-icon-glyph sword-glyph" id="sword-glyph">🗡️</div>
+          </div>
+          <div class="slot-details">
+            <span class="slot-name" id="inv-sword-name">GRAVITY BLADE</span>
+            <span class="slot-sub" id="inv-sword-type">5 SKILLS + M1</span>
+          </div>
+          <button class="slot-action-btn" id="btn-open-sword-modal">CHANGE</button>
+        </div>
+
+        <!-- Slot 3: Gun / Sidearm (Special for Rimefracture / Wildfire passives) -->
+        <div class="inventory-slot" id="slot-gun" title="Sidearm (Active with Rimefracture or Wildfire)">
+          <div class="slot-badge">GUN [3]</div>
+          <div class="slot-icon-wrapper" id="gun-icon-wrapper">
+            <div class="slot-icon-glyph gun-glyph" id="gun-glyph">🔫</div>
+          </div>
+          <div class="slot-details">
+            <span class="slot-name" id="inv-gun-name">AUTO-AIM CANNON</span>
+            <span class="slot-sub" id="inv-gun-status">MANUAL FIRE</span>
+          </div>
+          <button class="slot-action-btn" id="btn-fire-gun-manual">FIRE [R]</button>
+        </div>
+
+        <!-- Slot 4: Quick Mode Switch (Fruit / Sword Active) -->
+        <div class="inventory-slot slot-active-mode" id="slot-switch-active" title="Switch Skill Bar Focus (Fruit / Sword)">
+          <div class="slot-badge">ACTIVE [TAB]</div>
+          <div class="slot-icon-wrapper">
+            <div class="slot-icon-glyph switch-glyph" id="active-mode-glyph">🔄</div>
+          </div>
+          <div class="slot-details">
+            <span class="slot-name" id="active-mode-name">CAST: FRUIT</span>
+            <span class="slot-sub">CLICK TO SWAP</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-quick-hints">
+        <span>WASD: Move</span> • 
+        <span>Space: Jump / Levitate</span> • 
+        <span>Shift: Dash</span> • 
+        <span>L-Click: M1 Combo</span> • 
+        <span>R-Click / Drag: Orbit Cam</span> • 
+        <span>Wheel: Zoom (3-300m)</span> • 
+        <span>Z-X-C-V-B-F-G-N-M-L-K-J: Skills</span>
+      </div>
+    </footer>
+
+    <!-- Floating Damage Numbers Container -->
+    <div id="damage-numbers-layer" class="damage-layer"></div>
+  </div>
+
+  <!-- MODAL: Advanced Graphics Settings -->
+  <div id="modal-settings" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">SYSTEM CONFIGURATION //</span>
+          <h2 class="modal-title">ADVANCED GRAPHICS SETTINGS</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-settings">✕</button>
+      </div>
+
+      <div class="modal-body-scroll">
+        <!-- Preset selector -->
+        <div class="setting-group">
+          <label class="setting-label">GRAPHICS PRESET</label>
+          <div class="preset-btn-row">
+            <button class="preset-btn" data-preset="low">PERFORMANCE</button>
+            <button class="preset-btn" data-preset="medium">BALANCED</button>
+            <button class="preset-btn active" data-preset="high">HIGH SCI-FI</button>
+            <button class="preset-btn" data-preset="ultra">ULTRA HYPER</button>
+          </div>
+        </div>
+
+        <!-- Resolution Scaling -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">RENDER RESOLUTION SCALE</span>
+            <span class="setting-val" id="val-res-scale">100%</span>
+          </div>
+          <input type="range" class="sci-slider" id="opt-res-scale" min="0.5" max="1.5" step="0.25" value="1.0" />
+        </div>
+
+        <!-- Shadow Quality -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">DYNAMIC SHADOWS QUALITY</span>
+            <span class="setting-val" id="val-shadow-quality">HIGH (2048)</span>
+          </div>
+          <select class="sci-select" id="opt-shadow-quality">
+            <option value="off">OFF (MAX FPS)</option>
+            <option value="low">LOW (1024)</option>
+            <option value="high" selected>HIGH (2048)</option>
+            <option value="ultra">ULTRA (4096 SOFT)</option>
+          </select>
+        </div>
+
+        <!-- Particle Density -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">PARTICLE DENSITY / MAXIMUM BUFFER</span>
+            <span class="setting-val" id="val-particle-density">HIGH (4000)</span>
+          </div>
+          <select class="sci-select" id="opt-particle-density">
+            <option value="low">LOW (1000 PARTICLES)</option>
+            <option value="medium">MEDIUM (2500 PARTICLES)</option>
+            <option value="high" selected>HIGH (5000 PARTICLES)</option>
+            <option value="ultra">ULTRA (10000 PARTICLES)</option>
+          </select>
+        </div>
+
+        <!-- Lightning Rapid Segments Frequency (0.01s spec) -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">LIGHTNING SEGMENT RE-ROTATION SPEED</span>
+            <span class="setting-val" id="val-lightning-speed">0.01s (HIGH-FREQ SPEC)</span>
+          </div>
+          <div class="toggle-row">
+            <label class="sci-checkbox-label">
+              <input type="checkbox" id="opt-lightning-fast" checked />
+              <span>ENABLE 0.01s SEGMENT RE-ROTATION WITH ZERO-GC CACHING</span>
+            </label>
+          </div>
+          <small class="setting-desc">Re-rotates lightning bolt segments every 10 milliseconds via optimized buffer jitter without memory garbage collection pauses.</small>
+        </div>
+
+        <!-- Debris Physics -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">EXPLOSION DEBRIS PHYSICS</span>
+            <span class="setting-val" id="val-debris-count">35 PIECES / EXPLOSION</span>
+          </div>
+          <input type="range" class="sci-slider" id="opt-debris-count" min="10" max="60" step="5" value="35" />
+          <small class="setting-desc">3D physical debris chunks with floor collision, bouncing elasticity, tumbling rotation, and scorch settling.</small>
+        </div>
+
+        <!-- Fluid & Smoke Rainshafts Quality -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">RAINSHAFT & TORNADO FLUID SMOKE DYNAMICS</span>
+            <span class="setting-val" id="val-fluid-quality">HIGH DETAIL</span>
+          </div>
+          <select class="sci-select" id="opt-fluid-quality">
+            <option value="low">LOW (SIMPLE PARTICLES)</option>
+            <option value="high" selected>HIGH (FLUID VELOCITY TURBULENCE)</option>
+            <option value="ultra">ULTRA (MULTI-LAYER DOWNDRAFT VORTEX)</option>
+          </select>
+        </div>
+
+        <!-- Camera Shake Positional Scale (XYZ translation only) -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">CAMERA SHAKE INTENSITY (TRANSLATION ONLY)</span>
+            <span class="setting-val" id="val-shake-scale">100%</span>
+          </div>
+          <input type="range" class="sci-slider" id="opt-shake-scale" min="0" max="2" step="0.1" value="1.0" />
+          <small class="setting-desc">Strictly X, Y, Z translation with explosion distance falloff. Rotational pitch/yaw/roll shake is disabled per specification.</small>
+        </div>
+
+        <!-- Post-Processing Bloom & Glow -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">SCI-FI BLOOM & NEON GLOW</span>
+            <span class="setting-val" id="val-bloom">ON (INTENSITY: 1.2)</span>
+          </div>
+          <label class="sci-checkbox-label">
+            <input type="checkbox" id="opt-bloom-toggle" checked />
+            <span>ENABLE NEON POST-PROCESSING BLOOM</span>
+          </label>
+        </div>
+
+        <!-- Max View Distance -->
+        <div class="setting-group">
+          <div class="setting-title-row">
+            <span class="setting-name">MAX CAMERA / VIEW DISTANCE</span>
+            <span class="setting-val" id="val-view-dist">800 METERS</span>
+          </div>
+          <input type="range" class="sci-slider" id="opt-view-dist" min="300" max="1500" step="100" value="800" />
+        </div>
+
+        <!-- Telemetry Stats -->
+        <div class="system-stats-card">
+          <div class="stats-row"><span>FPS:</span> <span id="fps-stat" class="cyan-txt">60</span></div>
+          <div class="stats-row"><span>RENDER TIME:</span> <span id="ms-stat" class="cyan-txt">16.6 ms</span></div>
+          <div class="stats-row"><span>ACTIVE DEBRIS:</span> <span id="debris-stat" class="cyan-txt">0</span></div>
+          <div class="stats-row"><span>ACTIVE PARTICLES:</span> <span id="particles-stat" class="cyan-txt">0</span></div>
+          <div class="stats-row"><span>LIGHTNING INSTANCES:</span> <span id="lightning-stat" class="cyan-txt">0</span></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="sci-btn btn-primary" id="btn-apply-settings">APPLY CONFIGURATION</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Equipment Selector for Fruits -->
+  <div id="modal-fruits" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">EQUIPMENT VAULT //</span>
+          <h2 class="modal-title">CHOOSE SKILL FRUIT</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-fruits">✕</button>
+      </div>
+
+      <div class="modal-body-scroll equip-grid" id="fruit-equip-grid">
+        <!-- Dynamically populated or static fruit cards -->
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Equipment Selector for Swords -->
+  <div id="modal-swords" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">EQUIPMENT VAULT //</span>
+          <h2 class="modal-title">CHOOSE WEAPON / BLADE</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-swords">✕</button>
+      </div>
+
+      <div class="modal-body-scroll equip-grid" id="sword-equip-grid">
+        <!-- Dynamically populated sword cards -->
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Supercell Spawner Type Selector (Cloud Skill 9) -->
+  <div id="modal-supercell" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card modal-compact">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">METEOROLOGICAL MATRIX //</span>
+          <h2 class="modal-title">SELECT SUPERCELL CONFIGURATION</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-supercell">✕</button>
+      </div>
+
+      <div class="modal-body-scroll supercell-selection-row">
+        <!-- LP Supercell -->
+        <div class="supercell-card" id="select-supercell-lp">
+          <div class="supercell-badge">LP</div>
+          <h3>1. LOW PRECIPITATION SUPERCELL</h3>
+          <p class="sc-desc">Lowest precipitation, lowest base damage, but 2.5 times faster cooldown!</p>
+          <div class="sc-stats">
+            <div><span>SIZE:</span> 300 METERS</div>
+            <div><span>COOLDOWN:</span> 2.0s (FAST)</div>
+            <div><span>PRECIPITATION:</span> MINIMAL</div>
+          </div>
+          <button class="sci-btn btn-sm btn-primary">SPAWN LP SUPERCELL</button>
+        </div>
+
+        <!-- Normal Supercell -->
+        <div class="supercell-card active-card" id="select-supercell-normal">
+          <div class="supercell-badge">NORM</div>
+          <h3>2. NORMAL SUPERCELL</h3>
+          <p class="sc-desc">Balanced moisture, standard devastating hail, tornadoes & hyperbolt lightning.</p>
+          <div class="sc-stats">
+            <div><span>SIZE:</span> 500 METERS</div>
+            <div><span>COOLDOWN:</span> 5.0s (STANDARD)</div>
+            <div><span>PRECIPITATION:</span> HEAVY</div>
+          </div>
+          <button class="sci-btn btn-sm btn-accent">SPAWN NORMAL SUPERCELL</button>
+        </div>
+
+        <!-- HP Supercell -->
+        <div class="supercell-card" id="select-supercell-hp">
+          <div class="supercell-badge">HP</div>
+          <h3>3. HIGH PRECIPITATION SUPERCELL</h3>
+          <p class="sc-desc">Highest precipitation, catastrophic torrential deluge and damage, 2.5x slower cooldown.</p>
+          <div class="sc-stats">
+            <div><span>SIZE:</span> 700 METERS</div>
+            <div><span>COOLDOWN:</span> 12.5s (SLOW)</div>
+            <div><span>PRECIPITATION:</span> EXTREME</div>
+          </div>
+          <button class="sci-btn btn-sm btn-danger">SPAWN HP SUPERCELL</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Controls & Guides -->
+  <div id="modal-help" class="sci-modal-backdrop" style="display: none;">
+    <div class="sci-modal-card modal-compact">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-pre">PILOT MANUAL //</span>
+          <h2 class="modal-title">CONTROLS & SPECS</h2>
+        </div>
+        <button class="modal-close-btn" id="btn-close-help">✕</button>
+      </div>
+      <div class="modal-body-scroll">
+        <div class="help-section">
+          <h4>🎮 CROSS-PLATFORM CAMERA & ZOOM</h4>
+          <p>• <strong>Max Range:</strong> 300 meters accurately calibrated in 3D space.</p>
+          <p>• <strong>PC / Laptop:</strong> Mouse wheel zoom, Trackpad pinch, or [PageUp]/[PageDown].</p>
+          <p>• <strong>Mobile / Tablet:</strong> Pinch-to-zoom multi-touch or use the on-screen zoom slider.</p>
+          <p>• <strong>Console / Gamepad:</strong> Right Stick Up/Down, Triggers L2/R2, or D-pad.</p>
+          <p>• <strong>TV:</strong> Dedicated on-screen zoom buttons [+] and [-] at the left.</p>
+          <p>• <strong>Camera Shake:</strong> High-frequency random positional translation ONLY on X, Y, Z. Rotational shake (pitch, yaw, roll) is 100% disabled for aiming comfort and clarity. Stronger when closer to explosions, weaker when farther.</p>
+        </div>
+
+        <div class="help-section">
+          <h4>⚡ SKILL CASTING & HOTKEYS</h4>
+          <p>• <strong>Middle-Right Skill Bar:</strong> Compact panel showing exact skills matching equipped fruit or sword.</p>
+          <p>• <strong>PC Hotkeys:</strong> Z, X, C, V, B, F, G, N, M, L, K, J (only for active skills!).</p>
+          <p>• <strong>Mobile / Tablet:</strong> Use the dedicated [USE] button on the left of each skill row.</p>
+          <p>• <strong>Cooldown Fill:</strong> 100% to 0% animated wiping effect over the whole bar, with accurate second countdown timer.</p>
+        </div>
+
+        <div class="help-section">
+          <h4>⚔️ SEPARATED FRUIT & WEAPON INVENTORY</h4>
+          <p>• Bottom horizontal square slots allow equipping/unequipping Fruit, Sword, and Gun independently.</p>
+          <p>• Press <strong>[TAB]</strong> or click the Active slot to switch between casting Fruit Skills and Sword Skills.</p>
+          <p>• Press <strong>[R]</strong> or click FIRE GUN to manually fire Rimefracture or Wildfire passive guns with auto-aim.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
