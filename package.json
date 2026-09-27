@@ -1,0 +1,14 @@
+{
+  "name": "1090fruits",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "build": "vite build && cp -r dist/assets . && cp dist/index.html . && mkdir -p docs && cp -r dist/* docs/ && touch .nojekyll docs/.nojekyll",
+    "preview": "vite preview --host 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "lucide": "^0.575.0",
+    "three": "^0.186.0"
+  }
+}
