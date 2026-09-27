@@ -20,6 +20,50 @@ const EMBER_PER_BURST = 26;
 const SMOKE_POOL = 10;
 const SMOKE_PER_BURST = 6;
 
+function makeSootTexture() {
+  // Dark charred crater with irregular speckles (persists on the battlefield)
+  const cv = document.createElement('canvas');
+  cv.width = 128;
+  cv.height = 128;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(64, 64, 3, 64, 64, 62);
+  g.addColorStop(0, 'rgba(8, 6, 5, 0.95)');
+  g.addColorStop(0.4, 'rgba(18, 12, 9, 0.7)');
+  g.addColorStop(0.75, 'rgba(30, 20, 14, 0.3)');
+  g.addColorStop(1, 'rgba(30, 20, 14, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 90; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.pow(Math.random(), 0.6) * 58;
+    ctx.fillStyle = `rgba(5, 4, 3, ${0.1 + Math.random() * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(64 + Math.cos(a) * r, 64 + Math.sin(a) * r, 1 + Math.random() * 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeScorchGlowTexture() {
+  // Bright afterimage glow (lightning / ice / tectonic impacts)
+  const cv = document.createElement('canvas');
+  cv.width = 128;
+  cv.height = 128;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(64, 64, 2, 64, 64, 62);
+  g.addColorStop(0, 'rgba(255, 240, 210, 0.95)');
+  g.addColorStop(0.3, 'rgba(160, 220, 255, 0.55)');
+  g.addColorStop(0.7, 'rgba(80, 140, 220, 0.18)');
+  g.addColorStop(1, 'rgba(80, 140, 220, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 function makeRadialTexture(inner = 'rgba(255,255,255,0.9)', mid = 'rgba(255,255,255,0.35)', outer = 'rgba(255,255,255,0)') {
   const cv = document.createElement('canvas');
   cv.width = 64;
@@ -223,10 +267,99 @@ export class ExplosionManager {
 
     this.smokeBursts = [];
     for (let i = 0; i < SMOKE_POOL; i++) this.smokeBursts.push(new SmokeBurst(scene, this.smokeTex));
+
+    // ---------------------------------------------------------------
+    // PERSISTENT SCORCH MARKS (battlefield accumulates impact scars)
+    // ---------------------------------------------------------------
+    this.sootTex = makeSootTexture();
+    this.scorchGlowTex = makeScorchGlowTexture();
+
+    this.scorchPool = [];
+    const scorchGeo = new THREE.CircleGeometry(1, 24);
+    scorchGeo.rotateX(-Math.PI / 2);
+    for (let i = 0; i < 24; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.sootTex, transparent: true, opacity: 0, depthWrite: false, fog: false,
+      });
+      const mesh = new THREE.Mesh(scorchGeo, mat);
+      mesh.position.y = 0.05 + i * 0.0015; // stagger to avoid z-fighting
+      mesh.rotation.z = Math.random() * Math.PI * 2;
+      mesh.visible = false;
+      scene.add(mesh);
+      this.scorchPool.push({ mesh, mat, active: false, elapsed: 0, duration: 1, baseOpacity: 0 });
+    }
+
+    this.glowPool = [];
+    for (let i = 0; i < 12; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.scorchGlowTex, transparent: true, opacity: 0, depthWrite: false,
+        blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(scorchGeo, mat);
+      mesh.position.y = 0.07 + i * 0.0015;
+      mesh.visible = false;
+      scene.add(mesh);
+      this.glowPool.push({ mesh, mat, active: false, elapsed: 0, duration: 1, baseOpacity: 0 });
+    }
+
+    // ---------------------------------------------------------------
+    // VOLUMETRIC BLAST WALL (expanding cylinder for large explosions)
+    // ---------------------------------------------------------------
+    this.blastWalls = [];
+    const wallGeo = new THREE.CylinderGeometry(1, 1, 1, 40, 1, true);
+    for (let i = 0; i < 6; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0, side: THREE.DoubleSide,
+        depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(wallGeo, mat);
+      mesh.visible = false;
+      scene.add(mesh);
+      this.blastWalls.push({ mesh, mat, active: false, elapsed: 0, duration: 0.5, maxR: 10, height: 8 });
+    }
   }
 
   setDebrisCount(count) {
     this.debrisCountPerExplosion = Math.max(10, Math.min(80, count));
+  }
+
+  /** Public: spawn a small ember burst (firepits, gun impacts, etc.). */
+  sparkBurst(pos, colorHex, radius = 4.0) {
+    this._spawnEmbers(pos, colorHex, radius);
+  }
+
+  /** Public: quick dynamic light flash at a point (muzzle flash, etc.). */
+  flashAt(pos, colorHex, radius = 1.0, duration = 0.12) {
+    this._spawnFlashLight(pos, colorHex, radius, duration);
+  }
+
+  /** Place a persistent scorch mark (or bright afterimage) at an impact. */
+  _markImpact(pos, radius, glow) {
+    const pool = glow ? this.glowPool : this.scorchPool;
+    const m = pool.find(x => !x.active) || pool[0];
+    m.active = true;
+    m.elapsed = 0;
+    m.duration = glow ? (6 + Math.random() * 4) : (14 + Math.random() * 8);
+    m.mesh.position.x = pos.x;
+    m.mesh.position.z = pos.z;
+      m.mesh.scale.setScalar(Math.max(2.5, radius * 0.5));
+      m.baseScale = m.mesh.scale.x;
+      m.baseOpacity = glow ? 0.55 : Math.min(0.75, 0.22 + radius * 0.02);
+    m.mat.opacity = m.baseOpacity;
+    m.mesh.visible = true;
+  }
+
+  /** Spawn an expanding volumetric blast wall for large explosions. */
+  _blastWall(pos, radius, colorHex) {
+    const w = this.blastWalls.find(x => !x.active) || this.blastWalls[0];
+    w.active = true;
+    w.elapsed = 0;
+    w.duration = 0.5 + radius * 0.012;
+    w.maxR = radius;
+    w.height = Math.min(34, 7 + radius * 0.5);
+    w.mesh.position.set(pos.x, w.height * 0.5 + 0.2, pos.z);
+    w.mat.color.set(colorHex);
+    w.mesh.visible = true;
   }
 
   _spawnFlashLight(pos, colorHex, radius, duration = 0.55) {
@@ -389,6 +522,11 @@ export class ExplosionManager {
 
     // 5. DYNAMIC LIGHT - the arena is really lit by the blast
     this._spawnFlashLight(pos, colorHex, radius, 0.45 + radius * 0.02);
+
+    // 5b. Persistent scorch mark + volumetric blast wall (big blasts)
+    const isGlow = (type === 'lightning' || type === 'ice' || type === 'quake');
+    if (radius >= 6) this._markImpact(pos, radius, isGlow);
+    if (radius >= 14) this._blastWall(pos, radius, colorHex);
 
     // 6. EMBERS + SMOKE (per-type personality)
     this._spawnEmbers(pos, colorHex, radius);
@@ -553,6 +691,49 @@ export class ExplosionManager {
 
     for (const e of this.emberBursts) e.update(dt);
     for (const s of this.smokeBursts) s.update(dt);
+
+    // Persistent scorch marks: linger, then slowly fade out
+    for (const m of this.scorchPool) {
+      if (!m.active) continue;
+      m.elapsed += dt;
+      if (m.elapsed >= m.duration) {
+        m.active = false;
+        m.mesh.visible = false;
+        continue;
+      }
+      const remain = m.duration - m.elapsed;
+      m.mat.opacity = m.baseOpacity * Math.min(1, remain / 5.0);
+      m.mesh.rotation.z += dt * 0.015;
+    }
+    for (const m of this.glowPool) {
+      if (!m.active) continue;
+      m.elapsed += dt;
+      const t = m.elapsed / m.duration;
+      if (t >= 1.0) {
+        m.active = false;
+        m.mesh.visible = false;
+        continue;
+      }
+      const flicker = 0.8 + 0.2 * Math.sin(m.elapsed * 30.0);
+      m.mat.opacity = m.baseOpacity * (1.0 - t) * flicker;
+      m.mesh.scale.setScalar(m.baseScale * (1.0 + t * 0.4));
+    }
+
+    // Volumetric blast walls
+    for (const w of this.blastWalls) {
+      if (!w.active) continue;
+      w.elapsed += dt;
+      const t = w.elapsed / w.duration;
+      if (t >= 1.0) {
+        w.active = false;
+        w.mesh.visible = false;
+        continue;
+      }
+      const ease = 1.0 - Math.pow(1.0 - t, 2.2);
+      const r = Math.max(0.001, w.maxR * ease);
+      w.mesh.scale.set(r, w.height * (1.0 - t * 0.55), r);
+      w.mat.opacity = (1.0 - t) * 0.3;
+    }
   }
 
   getActiveDebrisCount() {

@@ -77,10 +77,48 @@ export class Player {
     this.createModel();
     this.createAimReticle();
     this.createAfterimages();
+    this.createSlashTrails();
 
     // Input state
     this.keys = {};
     this.initInput();
+  }
+
+  /**
+   * Pooled energy arcs that sweep across the hit zone on every M1 swing.
+   */
+  createSlashTrails() {
+    this.slashTrails = [];
+    const arcGeo = new THREE.TorusGeometry(1, 0.08, 8, 32, Math.PI * 1.2);
+    for (let i = 0; i < 5; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        side: THREE.DoubleSide, depthWrite: false,
+        blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(arcGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.slashTrails.push({ mesh, mat, active: false, life: 0, maxLife: 0.22 });
+    }
+  }
+
+  spawnSlashTrail(worldPos) {
+    const t = this.slashTrails.find(x => !x.active) || this.slashTrails[0];
+    t.active = true;
+    t.life = 0;
+    t.mesh.visible = true;
+
+    t.mesh.position.copy(worldPos);
+    // Arc plane contains (forward, up): point local +Z along the right vector
+    const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.group.rotation.y);
+    const look = new THREE.Vector3(worldPos.x + right.x, worldPos.y, worldPos.z + right.z);
+    t.mesh.lookAt(look);
+    t.mesh.rotateZ(Math.random() * 1.2 - 0.6 + (Math.random() < 0.5 ? Math.PI : 0));
+
+    t.mat.color.copy(this.auraMat.color);
+    t.mat.opacity = 0.95;
+    t.mesh.scale.setScalar(1.9);
   }
 
   createModel() {
@@ -538,6 +576,13 @@ export class Player {
     this.comboStep = (this.comboStep + 1) % 4;
 
     this.sound.playSlash(1.0 + this.comboStep * 0.2);
+
+    // Energy arc sweeping the hit zone in front of the operative
+    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.group.rotation.y);
+    const hitPos = this.position.clone().addScaledVector(forward, 3.2);
+    hitPos.y = 1.4;
+    this.spawnSlashTrail(hitPos);
+
     return true;
   }
 
@@ -699,6 +744,21 @@ export class Player {
       }
       a.mat.opacity = (a.life / 0.3) * 0.5;
       a.mesh.scale.setScalar(1 + (1 - a.life / 0.3) * 0.35);
+    }
+
+    // Energy slash arcs
+    for (const t of this.slashTrails) {
+      if (!t.active) continue;
+      t.life += dt;
+      if (t.life >= t.maxLife) {
+        t.active = false;
+        t.mesh.visible = false;
+        continue;
+      }
+      const p = t.life / t.maxLife;
+      t.mat.opacity = (1.0 - p) * 0.95;
+      t.mesh.scale.setScalar(1.9 + p * 1.3);
+      t.mesh.rotateZ(dt * 22.0);
     }
 
     // Passive HP regen

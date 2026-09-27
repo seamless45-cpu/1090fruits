@@ -244,6 +244,20 @@ export class CameraController {
     effectiveIntensity = Math.min(effectiveIntensity, SHAKE_HARD_CAP);
     if (effectiveIntensity < 0.005) return; // Discard imperceptible vibrations
 
+    // Physical push direction in the camera's LOCAL axis frame:
+    // the camera is "knocked" away from the blast. Translation only.
+    let push = new THREE.Vector3(0, 0, 0);
+    if (explosionOrigin) {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+      const dir = new THREE.Vector3().subVectors(this.camera.position, explosionOrigin);
+      if (dir.lengthSq() > 0.01) {
+        dir.normalize();
+        push = new THREE.Vector3(dir.dot(right), dir.dot(up), dir.dot(fwd));
+      }
+    }
+
     this.shakeList.push({
       initialIntensity: effectiveIntensity,
       duration: duration,
@@ -254,6 +268,8 @@ export class CameraController {
       cur: new THREE.Vector3(0, 0, 0),
       // Target the smoothed value chases (re-rolled every cycle)
       goal: new THREE.Vector3(0, 0, 0),
+      // One-shot directional impulse away from the blast
+      push,
     });
   }
 
@@ -385,6 +401,15 @@ export class CameraController {
       s.cur.lerp(s.goal, follow);
 
       this._localOffset.add(s.cur);
+
+      // Directional impulse: a one-shot "knock" away from the blast,
+      // decaying faster than the jitter. Pure X/Y/Z translation.
+      if (s.push.lengthSq() > 0) {
+        const pushScale = 0.4 * curIntensity * Math.exp(-s.elapsed * 2.6);
+        this._localOffset.x += s.push.x * pushScale;
+        this._localOffset.y += s.push.y * pushScale;
+        this._localOffset.z += s.push.z * pushScale;
+      }
     }
 
     // -------------------------------------------------------------

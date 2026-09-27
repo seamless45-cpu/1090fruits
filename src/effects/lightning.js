@@ -229,6 +229,9 @@ export class LightningManager {
 
     this.rapidRate = 0.01; // 0.01s segment re-rotation
 
+    // Global flash level (0..1+) consumed by the arena to light up the sky
+    this.flashLevel = 0;
+
     // ---------------------------------------------------------------
     // DYNAMIC LIGHT POOL - each strike flashes a real point light so
     // the arena, player and enemies are momentarily illuminated.
@@ -260,6 +263,21 @@ export class LightningManager {
 
   setRapidRate(val) {
     this.rapidRate = val;
+  }
+
+  /**
+   * Public: flash a dynamic light (e.g. muzzle flash) without a bolt.
+   */
+  flash(pos, colorHex, power = 1.0, duration = 0.35) {
+    this._flashLight(pos, colorHex, power, duration);
+    this.flashLevel = Math.min(1.5, this.flashLevel + power * 0.12);
+  }
+
+  /**
+   * Public: expanding ground impact ring without a bolt.
+   */
+  groundFlash(pos, colorHex, maxR = 20, duration = 0.45) {
+    this._groundFlash(pos, colorHex, maxR, duration);
   }
 
   /** Assign a dynamic flash light to a strike point. */
@@ -312,6 +330,7 @@ export class LightningManager {
     const power = Math.min(2.2, 0.6 + height / 120.0);
     this._flashLight(groundPos, colorHex, power, duration + 0.15);
     this._groundFlash(groundPos, colorHex, 10 + height * 0.18, 0.4 + duration * 0.5);
+    this.flashLevel = Math.min(1.5, this.flashLevel + 0.75);
 
     return bolt;
   }
@@ -323,6 +342,7 @@ export class LightningManager {
     // One light per cluster (not per bolt) to keep the pool cheap
     this._flashLight(groundPos, colorHex, 0.5 + Math.min(1.6, count * 0.25), 0.5);
     this._groundFlash(groundPos, colorHex, 12 + radius * 4, 0.55);
+    this.flashLevel = Math.min(1.5, this.flashLevel + 0.35 * count);
 
     for (let i = 0; i < count; i++) {
       const offset = new THREE.Vector3(
@@ -362,6 +382,9 @@ export class LightningManager {
   }
 
   update(dt) {
+    // Global sky flash decays fast (staccato double-flicker feel)
+    this.flashLevel = Math.max(0, this.flashLevel - dt * 7.0);
+
     // Bolts
     for (let i = 0; i < this.boltPool.length; i++) {
       if (this.boltPool[i].active) {

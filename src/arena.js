@@ -27,6 +27,7 @@ const SKY_VERT = /* glsl */`
 
 const SKY_FRAG = /* glsl */`
   uniform float uTime;
+  uniform float uFlash; // lightning illumination of the whole sky
   varying vec3 vDir;
 
   // Cheap deterministic hash
@@ -69,6 +70,9 @@ const SKY_FRAG = /* glsl */`
     float halo = pow(clamp(md, 0.0, 1.0), 180.0) * 0.35;
     vec3 moonCol = vec3(0.85, 0.92, 1.05);
     sky += moonCol * (disc * 1.6 + halo);
+
+    // Lightning flash: cool white-blue wash across the whole sky
+    sky += vec3(0.55, 0.75, 1.0) * uFlash * (0.35 + 0.65 * smoothstep(0.0, 0.5, h));
 
     gl_FragColor = vec4(sky, 1.0);
   }
@@ -179,9 +183,11 @@ function makeFloorTexture(size = 2048) {
 }
 
 export class Arena {
-  constructor(scene) {
+  constructor(scene, renderer = null) {
     this.scene = scene;
+    this.renderer = renderer;
     this.clockT = 0;
+    this.skyFlash = 0;
 
     this.createSky();
     this.createFloor();
@@ -190,7 +196,13 @@ export class Arena {
     this.createCenterCore();
     this.createDistantTowers();
     this.createDust();
+    this.createGroundFog();
     this.createLights();
+
+    // Real reflections: PMREM environment map for all metallic surfaces
+    if (renderer) {
+      this.createEnvironment();
+    }
   }
 
   createSky() {
@@ -198,7 +210,10 @@ export class Arena {
     this.skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
-      uniforms: { uTime: { value: 0 } },
+      uniforms: {
+        uTime: { value: 0 },
+        uFlash: { value: 0 },
+      },
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
@@ -206,6 +221,69 @@ export class Arena {
     this.sky = new THREE.Mesh(geo, this.skyMat);
     this.sky.renderOrder = -10;
     this.scene.add(this.sky);
+  }
+
+  /**
+   * Build a PMREM environment map so every metallic / glossy material
+   * (player armor, enemy mechs, pylons, floor) reflects the storm sky
+   * and neon accents. One-time cost, huge realism payoff.
+   */
+  createEnvironment() {
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+
+    const envScene = new THREE.Scene();
+
+    // Gradient dome matching the game sky (slightly brighter for reflections)
+    const domeGeo = new THREE.SphereGeometry(50, 24, 16);
+    const domeMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: `
+        varying vec3 vP;
+        void main() {
+          float h = normalize(vP).y * 0.5 + 0.5;
+          vec3 bot = vec3(0.05, 0.09, 0.14);
+          vec3 mid = vec3(0.10, 0.20, 0.34);
+          vec3 top = vec3(0.02, 0.05, 0.12);
+          vec3 c = mix(bot, mid, smoothstep(0.0, 0.5, h));
+          c = mix(c, top, smoothstep(0.5, 1.0, h));
+          gl_FragColor = vec4(c * 2.0, 1.0);
+        }`,
+    });
+    envScene.add(new THREE.Mesh(domeGeo, domeMat));
+
+    // Neon accent panels - make reflections interesting (cyan / purple / warm)
+    const panel = (color, intensity, pos, rotY, scale) => {
+      const g = new THREE.PlaneGeometry(1, 1);
+      const m = new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(intensity), side: THREE.DoubleSide });
+      const p = new THREE.Mesh(g, m);
+      p.position.copy(pos);
+      p.rotation.y = rotY;
+      p.scale.setScalar(scale);
+      envScene.add(p);
+    };
+    panel(0x00d8ff, 6.0, new THREE.Vector3(-18, 6, -20), 0.8, 10);
+    panel(0xb026ff, 5.0, new THREE.Vector3(20, 8, 16), -2.4, 8);
+    panel(0xff6633, 3.0, new THREE.Vector3(10, -4, -24), 1.2, 7);
+    panel(0xffffff, 8.0, new THREE.Vector3(0, 26, 0), 0, 5); // "moon" highlight
+
+    this.envRT = pmrem.fromScene(envScene, 0.06);
+    this.scene.environment = this.envRT.texture;
+    this.scene.environmentIntensity = 0.55;
+    pmrem.dispose();
+    envScene.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    });
+  }
+
+  /**
+   * Set the global lightning sky flash (0..1+). Called each frame from
+   * the game engine with the lightning manager's current flash level.
+   */
+  setSkyFlash(level) {
+    this.skyFlash = level;
+    this.skyMat.uniforms.uFlash.value = Math.min(1.5, level);
   }
 
   createFloor() {
@@ -415,6 +493,42 @@ export class Arena {
     this.scene.add(this.dust);
   }
 
+  createGroundFog() {
+    // Low, slow-drifting mist sheets for atmospheric depth
+    const cv = document.createElement('canvas');
+    cv.width = 128;
+    cv.height = 128;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createRadialGradient(64, 64, 4, 64, 64, 62);
+    g.addColorStop(0, 'rgba(255,255,255,0.55)');
+    g.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 128, 128);
+    const tex = new THREE.CanvasTexture(cv);
+
+    this.fogSprites = [];
+    for (let i = 0; i < 10; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: tex, color: 0x6f93b8, transparent: true,
+        opacity: 0.05 + Math.random() * 0.05, depthWrite: false,
+      });
+      const sp = new THREE.Sprite(mat);
+      const r = 80 + Math.random() * 240;
+      const a = Math.random() * Math.PI * 2;
+      sp.position.set(Math.cos(a) * r, 1.5 + Math.random() * 3.5, Math.sin(a) * r);
+      const s = 70 + Math.random() * 100;
+      sp.scale.set(s, s * 0.32, 1);
+      this.scene.add(sp);
+      this.fogSprites.push({
+        sp, mat, r, a,
+        speed: (0.004 + Math.random() * 0.012) * (Math.random() < 0.5 ? -1 : 1),
+        baseOpacity: mat.opacity,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
   createLights() {
     // Cold moonlight key light with soft shadows
     this.hemi = new THREE.HemisphereLight(0x35507a, 0x0a0e14, 0.85);
@@ -504,6 +618,18 @@ export class Arena {
     for (const r of this.rings) {
       r.mat.opacity = r.baseOpacity * (0.75 + 0.25 * Math.sin(t * 1.3 + r.phase));
     }
+
+    // Drifting ground fog
+    for (const f of this.fogSprites) {
+      f.a += f.speed * dt;
+      f.sp.position.x = Math.cos(f.a) * f.r;
+      f.sp.position.z = Math.sin(f.a) * f.r;
+      f.mat.opacity = f.baseOpacity * (0.8 + 0.2 * Math.sin(t * 0.3 + f.phase));
+    }
+
+    // Sky flash decay (driven externally each frame, smoothed here)
+    this.skyFlash = Math.max(0, this.skyFlash - dt * 6.0);
+    this.skyMat.uniforms.uFlash.value = Math.min(1.5, this.skyFlash);
 
     // Drifting dust
     const arr = this.dust.geometry.attributes.position.array;

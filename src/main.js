@@ -74,12 +74,26 @@ export class GameEngine {
     this.explosions = new ExplosionManager(this.scene, this.cameraController, this.sound);
     this.weather = new CloudWeatherManager(this.scene, this.lightning, this.explosions);
 
-    // 4. Arena & World
-    this.arena = new Arena(this.scene);
+    // 4. Arena & World (renderer passed in for PMREM environment reflections)
+    this.arena = new Arena(this.scene, this.renderer);
 
     // 5. Player & Combat Entities
     this.player = new Player(this.scene, this.sound);
     this.enemies = new EnemyManager(this.scene, this.explosions);
+
+    // Visible tracer bolts for passive guns (pooled)
+    this.tracerPool = [];
+    const tracerGeo = new THREE.BoxGeometry(0.07, 0.07, 1);
+    for (let i = 0; i < 8; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0,
+        depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      });
+      const mesh = new THREE.Mesh(tracerGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.tracerPool.push({ mesh, mat, active: false, life: 0, duration: 0.13 });
+    }
 
     // Active Equipment State (Strictly separated fruit & sword)
     this.equippedFruit = 'gravity';
@@ -321,6 +335,24 @@ export class GameEngine {
   }
 
   /**
+   * Fire a visible tracer bolt from the weapon to a target point.
+   */
+  fireTracer(from, to, colorHex) {
+    const t = this.tracerPool.find(x => !x.active) || this.tracerPool[0];
+    t.active = true;
+    t.life = 0;
+    t.mesh.visible = true;
+
+    t.mesh.position.copy(from).add(to).multiplyScalar(0.5);
+    t.mesh.lookAt(to);
+    const len = from.distanceTo(to);
+    t.mesh.scale.set(1, 1, Math.max(0.5, len));
+
+    t.mat.color.setHex(colorHex);
+    t.mat.opacity = 0.85;
+  }
+
+  /**
    * M1 Melee Attack logic for equipped weapons
    */
   handleM1Attack() {
@@ -385,6 +417,18 @@ export class GameEngine {
     // Auto-aim target: closest enemy within 150m or mouse cursor
     const closest = this.enemies.findClosestEnemy(this.player.position, 150);
     const targetPos = closest.enemy ? closest.enemy.mesh.position.clone() : this.player.aimTarget.clone();
+    targetPos.y += 1.2;
+
+    // Visible muzzle flash + tracer bolt (the gun "feels" like it fires)
+    const beamColor = fruit === 'rimefracture' ? 0x9ff4ff : 0xffaa44;
+    const weaponPos = this.player.position.clone();
+    weaponPos.y = 1.55;
+    // Front of the operative (local -Z rotated by body yaw)
+    weaponPos.x -= Math.sin(this.player.group.rotation.y) * 0.5;
+    weaponPos.z -= Math.cos(this.player.group.rotation.y) * 0.5;
+    this.fireTracer(weaponPos, targetPos, beamColor);
+    this.explosions.flashAt(weaponPos, beamColor, 1.0, 0.1);
+    this.lightning.flash(weaponPos, fruit === 'rimefracture' ? '#9ff4ff' : '#ffaa44', 0.35, 0.12);
 
     if (fruit === 'rimefracture') {
       // SPECIFICATION:
@@ -556,6 +600,21 @@ export class GameEngine {
     // 5b. Animated environment (sky, core, pylons, dust, rings)
     this.arena.update(dt, this.camera);
 
+    // 5c. Whole-sky lightning illumination (driven by active strikes)
+    this.arena.setSkyFlash(this.lightning.flashLevel);
+
+    // 5d. Visible tracer bolts
+    for (const t of this.tracerPool) {
+      if (!t.active) continue;
+      t.life += dt;
+      if (t.life >= t.duration) {
+        t.active = false;
+        t.mesh.visible = false;
+        continue;
+      }
+      t.mat.opacity = (1.0 - t.life / t.duration) * 0.85;
+    }
+
     // 6. Update Active Floor Hazards (Firepits / Lava pits)
     for (let i = this.activeHazards.length - 1; i >= 0; i--) {
       const h = this.activeHazards[i];
@@ -577,6 +636,17 @@ export class GameEngine {
       h.mat.opacity = 0.5 * flicker * Math.min(1, (h.duration - h.elapsed) * 2);
       h.coreMat.opacity = 0.7 * flicker * Math.min(1, (h.duration - h.elapsed) * 2);
       h.light.intensity = 1.8 * flicker * Math.min(1, (h.duration - h.elapsed));
+
+      // Continuous rising embers from the pit
+      h.emberTimer = (h.emberTimer || 0) + dt;
+      if (h.emberTimer > 0.55) {
+        h.emberTimer = 0;
+        const ep = h.center.clone();
+        ep.x += (Math.random() - 0.5) * h.radius * 0.6;
+        ep.z += (Math.random() - 0.5) * h.radius * 0.6;
+        ep.y = 0.3;
+        this.explosions.sparkBurst(ep, 0xff7733, 3.5);
+      }
 
       // Tick damage to enemies inside hazard
       if (h.tickTimer >= 0.5) {

@@ -237,6 +237,8 @@ const fakeHazards = [];
     equippedSword: 'gravity_blade',
     equippedFruit: 'rimefracture',
     gunFireCooldown: 0,
+    tracerPool: [],
+    fireTracer: () => { /* visual-only, no-op in headless */ },
   };
   for (let i = 0; i < 4; i++) GameEngine.prototype.handleM1Attack.call(fakeGame);
   ok('M1 combo x4 (gravity blade charge + 6-24 bolt burst)');
