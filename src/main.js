@@ -392,7 +392,7 @@ export class GameEngine {
       xpText.textContent = `${formatNumber(p.xp)} / ${formatNumber(need)} XP`;
     }
     if (spEl) {
-      spEl.textContent = p.statPoints > 0 ? `+${p.statPoints}` : '0';
+      spEl.textContent = `${p.statPoints} PTS`;
       spEl.classList.toggle('stat-points-ready', p.statPoints > 0);
     }
     // STATS button corner badge
@@ -401,7 +401,7 @@ export class GameEngine {
       badge.textContent = p.statPoints;
       badge.style.display = p.statPoints > 0 ? 'flex' : 'none';
     }
-    if (worldEl) worldEl.textContent = `WORLD LVL ${this.enemies.worldLevel}`;
+    if (worldEl) worldEl.textContent = `WORLD ${this.enemies.worldLevel}`;
 
     // Low-HP screen pulse
     document.body.classList.toggle('low-hp', p.hp > 0 && (p.hp / p.maxHp) < 0.25);

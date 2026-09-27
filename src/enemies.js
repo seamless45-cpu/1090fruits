@@ -515,6 +515,11 @@ export class Enemy {
     const layer = document.getElementById('damage-numbers-layer');
     if (!layer || !window.__activeCamera) return;
 
+    // HUD TIDY: cap live floating numbers so big AoEs / swarms don't paint the screen
+    const MAX_FLOATING = 90;
+    const live = layer.querySelectorAll ? layer.querySelectorAll('.floating-dmg').length : 0;
+    if (live >= MAX_FLOATING) return;
+
     const screenPos = this.mesh.position.clone();
     screenPos.y += (this.type === 'boss' ? 8 : (this.type === 'elite' ? 3.5 : 2.0));
     screenPos.project(window.__activeCamera);

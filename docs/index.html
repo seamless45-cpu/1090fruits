@@ -63,11 +63,17 @@
             <span class="status-dot pulse-cyan"></span>
             <span class="pilot-id">OPERATIVE // 1090</span>
             <span class="fruit-badge" id="hud-fruit-name">GRAVITY</span>
-            <span class="level-badge" id="hud-level">LVL 1</span>
-            <span class="world-badge" id="hud-world-level">WORLD LVL 1</span>
-            <span class="stat-points-badge" id="hud-stat-points" title="Available stat points (open STATS)">0</span>
           </div>
           <div class="range-readout" id="reticle-range">RANGE: -- M</div>
+        </div>
+
+        <!-- Compact status strip: level / world level / unspent stat points -->
+        <div class="status-strip">
+          <span class="strip-item strip-level" id="hud-level">LVL 1</span>
+          <span class="strip-sep">/</span>
+          <span class="strip-item strip-world" id="hud-world-level">WORLD 1</span>
+          <span class="strip-sep">/</span>
+          <span class="strip-item strip-points" id="hud-stat-points" title="Unspent stat points — open STATS to allocate">0 PTS</span>
         </div>
 
         <div class="bars-container">
@@ -86,15 +92,6 @@
               <div class="bar-fill hp-fill" id="player-hp-bar" style="width: 100%;"></div>
             </div>
             <span class="bar-val" id="player-hp-text">1000 / 1000</span>
-          </div>
-
-          <!-- Energy/Charge Bar -->
-          <div class="bar-row">
-            <span class="bar-label">EN</span>
-            <div class="bar-track en-track">
-              <div class="bar-fill en-fill" id="player-en-bar" style="width: 100%;"></div>
-            </div>
-            <span class="bar-val" id="player-en-text">100%</span>
           </div>
 
           <!-- Special Charge / Superpower state (e.g. Gravity Blade Charge, Ice Bombard, Hell Fury) -->
@@ -130,26 +127,22 @@
         </div>
       </div>
 
-      <!-- Top Right: System Menu & Spawner & Graphics Settings -->
+      <!-- Top Right: System Menu (icon-only, tooltips on hover) -->
       <div class="top-actions">
-        <button id="btn-stats" class="sci-btn btn-sm sci-btn-accent" title="Allocate Stat Points">
+        <button id="btn-stats" class="sci-btn btn-icon-only sci-btn-accent" title="Allocate Stat Points (✦)">
           <span class="btn-icon">✦</span>
-          <span class="btn-text">STATS</span>
-          <span class="stats-badge" id="stats-badge-hint">3</span>
+          <span class="stats-badge" id="stats-badge-hint" style="display: none;">0</span>
         </button>
-        <button id="btn-spawner" class="sci-btn btn-sm" title="Combat Arena Spawner">
+        <button id="btn-spawner" class="sci-btn btn-icon-only" title="Combat Arena Spawner">
           <span class="btn-icon">⚡</span>
-          <span class="btn-text">SPAWNER</span>
         </button>
-        <button id="btn-audio" class="sci-btn btn-sm" title="Toggle SFX Audio">
+        <button id="btn-audio" class="sci-btn btn-icon-only" title="Toggle SFX Audio">
           <span class="btn-icon" id="audio-icon">🔊</span>
-          <span class="btn-text" id="audio-text">SFX ON</span>
         </button>
-        <button id="btn-settings" class="sci-btn btn-sm sci-btn-accent" title="Advanced Graphics Settings">
+        <button id="btn-settings" class="sci-btn btn-icon-only" title="Graphics Settings">
           <span class="btn-icon">⚙</span>
-          <span class="btn-text">GRAPHICS</span>
         </button>
-        <button id="btn-help" class="sci-btn btn-sm" title="Controls & Skill Guides">
+        <button id="btn-help" class="sci-btn btn-icon-only" title="Controls & Skill Guides">
           <span class="btn-icon">?</span>
         </button>
       </div>
@@ -242,7 +235,6 @@
             <span class="slot-name" id="inv-fruit-name">GRAVITY</span>
             <span class="slot-sub" id="inv-fruit-type">6 SKILLS</span>
           </div>
-          <button class="slot-action-btn" id="btn-open-fruit-modal">CHANGE</button>
         </div>
 
         <!-- Slot 2: Equipped Sword / Melee Weapon -->
@@ -255,7 +247,6 @@
             <span class="slot-name" id="inv-sword-name">GRAVITY BLADE</span>
             <span class="slot-sub" id="inv-sword-type">5 SKILLS + M1</span>
           </div>
-          <button class="slot-action-btn" id="btn-open-sword-modal">CHANGE</button>
         </div>
 
         <!-- Slot 3: Gun / Sidearm (Special for Rimefracture / Wildfire passives) -->
@@ -285,13 +276,7 @@
       </div>
 
       <div class="hud-quick-hints">
-        <span>WASD: Move</span> • 
-        <span>Space: Jump / Levitate</span> • 
-        <span>Shift: Dash</span> • 
-        <span>L-Click: M1 Combo</span> • 
-        <span>R-Click / Drag: Orbit Cam</span> • 
-        <span>Wheel: Zoom (3-300m)</span> • 
-        <span>Z-X-C-V-B-F-G-N-M-L-K-J: Skills</span>
+        WASD Move &nbsp;•&nbsp; LMB Attack &nbsp;•&nbsp; Shift Dash &nbsp;•&nbsp; RMB Orbit &nbsp;•&nbsp; Wheel Zoom &nbsp;•&nbsp; Z-X-C-V-B-F-G Skills &nbsp;•&nbsp; R Fire Gun
       </div>
     </footer>
 

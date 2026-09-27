@@ -290,6 +290,23 @@ html, body {
   gap: 8px;
 }
 
+/* Icon-only system buttons: tight, uniform, tooltips carry the label */
+.top-actions .btn-icon-only {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  padding: 0;
+  justify-content: center;
+  position: relative;
+}
+.top-actions .btn-icon-only .btn-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.top-actions .btn-icon-only:hover {
+  transform: translateY(-2px);
+}
+
 .sci-btn {
   background: rgba(11, 23, 42, 0.85);
   border: 1px solid rgba(0, 240, 255, 0.4);
@@ -863,9 +880,7 @@ html, body {
   color: #8bb2cc;
 }
 
-.slot-action-btn {
-  display: none; /* Triggered on click */
-}
+/* (per-slot CHANGE buttons removed in round 4 — the whole slot is the click target) */
 
 .slot-active-mode {
   border-color: var(--neon-purple);
@@ -1595,46 +1610,52 @@ body.in-game .hud-overlay {
 /* ================================================================
    LEVEL / XP / STAT HUD ELEMENTS
 ================================================================ */
-.level-badge {
-  font-family: var(--font-display);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: #ffd75e;
-  background: rgba(255, 190, 40, 0.1);
-  border: 1px solid rgba(255, 190, 40, 0.5);
-  padding: 1px 8px;
+/* Compact status strip (level / world / stat points) under the vital header */
+.status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -1px 0 8px;
+  padding: 3px 9px;
+  background: rgba(4, 10, 20, 0.65);
+  border: 1px solid rgba(0, 240, 255, 0.14);
   border-radius: 2px;
-  text-shadow: 0 0 8px rgba(255, 190, 40, 0.7);
 }
-.world-badge {
+.strip-item {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
-  color: rgba(140, 255, 170, 0.8);
-  border: 1px solid rgba(140, 255, 170, 0.35);
-  padding: 1px 6px;
-  border-radius: 2px;
+  color: rgba(150, 190, 215, 0.75);
+  white-space: nowrap;
 }
-.stat-points-badge {
+.strip-sep {
+  color: rgba(0, 240, 255, 0.28);
+  font-size: 10px;
+  user-select: none;
+}
+.strip-level {
   font-family: var(--font-display);
-  font-size: 11px;
   font-weight: 700;
-  color: #7df9ff;
-  border: 1px solid rgba(0, 240, 255, 0.4);
-  padding: 1px 8px;
-  border-radius: 2px;
-  opacity: 0.4;
+  font-size: 11px;
+  color: #ffd75e;
+  text-shadow: 0 0 8px rgba(255, 190, 40, 0.55);
 }
-.stat-points-badge.stat-points-ready {
+.strip-world {
+  color: rgba(140, 255, 170, 0.85);
+}
+.strip-points {
+  opacity: 0.45;
+  transition: opacity 0.2s ease, color 0.2s ease;
+}
+.strip-points.stat-points-ready {
   opacity: 1;
-  animation: statBadgePulse 1.1s ease-in-out infinite;
-  border-color: var(--neon-cyan);
-  box-shadow: 0 0 12px rgba(0, 240, 255, 0.6);
+  color: #7df9ff;
+  text-shadow: 0 0 10px rgba(0, 240, 255, 0.8);
+  animation: pointsPulse 1.1s ease-in-out infinite;
 }
-@keyframes statBadgePulse {
-  0%, 100% { box-shadow: 0 0 8px rgba(0, 240, 255, 0.4); }
-  50% { box-shadow: 0 0 18px rgba(0, 240, 255, 0.9); }
+@keyframes pointsPulse {
+  0%, 100% { text-shadow: 0 0 6px rgba(0, 240, 255, 0.5); }
+  50% { text-shadow: 0 0 14px rgba(0, 240, 255, 1); }
 }
 .xp-track {
   background: rgba(40, 30, 6, 0.6);
@@ -1930,4 +1951,57 @@ body.low-hp::after {
 @keyframes lowHpPulse {
   0%, 100% { opacity: 0.45; }
   50% { opacity: 0.95; }
+}
+
+/* ================================================================
+   ROUND 4 - TIDY HUD (progressive declutter on smaller viewports)
+================================================================ */
+/* Medium screens: drop the hints wall, tighten the vital card */
+@media (max-width: 1440px) {
+  .hud-quick-hints { display: none; }
+  .player-vital-card { min-width: 250px; }
+}
+
+@media (max-width: 1280px) {
+  .target-telemetry { display: none; }
+  .top-bar { padding: 8px 12px; gap: 10px; }
+  .player-vital-card { min-width: 230px; padding: 8px 10px; }
+  .bar-track { height: 8px; }
+  .status-strip { gap: 6px; padding: 2px 7px; }
+  .strip-item { font-size: 9px; }
+}
+
+/* Small screens: shrink inventory slots + skill panel */
+@media (max-width: 1024px) {
+  .skill-panel-container { width: 208px; }
+  .inventory-slot { width: 76px; height: 76px; }
+  .slot-icon-glyph { font-size: 20px; }
+  .inventory-slots-row { gap: 8px; padding: 6px 8px; }
+  .top-actions .btn-icon-only { width: 34px; height: 34px; min-width: 34px; }
+}
+
+/* Very small screens: keep only essentials visible */
+@media (max-width: 760px) {
+  .player-vital-card { min-width: 0; width: 46vw; }
+  .pilot-id { display: none; }
+  .inventory-slot { width: 64px; height: 64px; }
+  .slot-name { font-size: 8px; }
+}
+
+/* Short windows: cap the skill list so it never buries the inventory */
+@media (max-height: 700px) {
+  .skill-list {
+    max-height: 40vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .bottom-inventory-bar { padding-bottom: 4px; }
+}
+
+/* Focus the eye: dim secondary HUD chrome while a modal is open */
+body:has(.sci-modal-backdrop[style*="flex"]) .target-telemetry,
+body:has(.sci-modal-backdrop[style*="flex"]) .hud-quick-hints,
+body:has(.sci-modal-backdrop[style*="flex"]) .zoom-controls-overlay {
+  opacity: 0.25;
+  transition: opacity 0.3s ease;
 }
