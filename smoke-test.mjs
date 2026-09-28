@@ -153,6 +153,49 @@ for (const t of ['asteroid', 'lightning', 'quake', 'alarm', 'ice', 'fire', 'clou
 }
 ok('Spawned all 7 explosion types + full weather suite');
 
+// Instanced debris: instances must be live immediately after the blasts
+{
+  const n = explosions.getActiveDebrisCount();
+  if (!(n > 0)) throw new Error(`expected live instanced debris after 7 explosions, got ${n}`);
+  ok(`Instanced debris live right after blasts (active instances: ${n})`);
+}
+
+// VFX pre-warm: renderer.compile must accept every pooled effect
+{
+  let compiled = false;
+  const fakeRenderer = { compile: () => { compiled = true; } };
+  const count = explosions.preflight(fakeRenderer, camera);
+  if (!compiled) throw new Error('preflight did not call renderer.compile');
+  if (!(count > 100)) throw new Error(`preflight warmed only ${count} objects`);
+  ok(`VFX armory pre-warmed ${count} pooled effects for shader compilation`);
+}
+
+// VFX stress: 300-explosion barrage (ring-buffer overflow safety + timing)
+{
+  const types = ['asteroid', 'lightning', 'quake', 'alarm', 'ice', 'fire', 'cloud'];
+  const t0 = performance.now();
+  for (let i = 0; i < 300; i++) {
+    explosions.createExplosion(
+      new THREE.Vector3((Math.random() - 0.5) * 160, 0, (Math.random() - 0.5) * 160),
+      8 + Math.random() * 40,
+      types[i % 7],
+      1.5
+    );
+  }
+  const spawnMs = performance.now() - t0;
+  const peakDebris = explosions.getActiveDebrisCount();
+  const t1 = performance.now();
+  for (let i = 0; i < 400; i++) explosions.update(1 / 60);
+  const simMs = performance.now() - t1;
+  // All pools must be bounded: debris slots ring-buffer (<= 4*256 live)
+  if (peakDebris > 4 * 256) throw new Error(`debris unbounded: ${peakDebris}`);
+  if (peakDebris === 0) throw new Error('stress barrage produced no debris');
+  // Let everything expire
+  for (let i = 0; i < 600; i++) explosions.update(1 / 60);
+  if (explosions.getActiveDebrisCount() !== 0) throw new Error('debris never expired after barrage');
+  ok(`VFX stress: 300-explosion barrage spawned in ${spawnMs.toFixed(1)}ms, peak ${peakDebris} debris instances, ${400} update frames in ${simMs.toFixed(1)}ms (${(simMs / 400).toFixed(2)}ms/frame), fully expired`);
+}
+
 // Lightning variants
 lightning.strikeBolt(new THREE.Vector3(5, 0, 5), 100, '#00f0ff', 0.3, 24);
 lightning.strikeOverlapped(new THREE.Vector3(-10, 0, 10), 4, 3, 90, '#b026ff');

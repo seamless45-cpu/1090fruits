@@ -57,13 +57,16 @@ export class GameEngine {
     this.renderer.toneMappingExposure = 1.12;
     this.container.appendChild(this.renderer.domElement);
 
-    // 1b. Post-processing: neon bloom
+    // 1b. Post-processing: neon bloom.
+    // PERF: bloom runs at HALF resolution - it is a wide gaussian blur by
+    // design, so halving the render targets cuts ~75% of the bloom chain's
+    // GPU work with no visible quality loss.
     this.composer = new EffectComposer(this.renderer);
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.composer.addPass(this.renderPass);
 
     this.bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      new THREE.Vector2(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2)),
       1.15,   // strength
       0.55,   // radius
       0.72    // threshold
@@ -117,6 +120,7 @@ export class GameEngine {
     this.raycaster = new THREE.Raycaster();
     this.mouseNDC = new THREE.Vector2(0, 0);
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    this._intersectPoint = new THREE.Vector3(); // per-frame raycast scratch
 
     // Telemetry & FPS
     this.clock = new THREE.Clock();
@@ -131,6 +135,7 @@ export class GameEngine {
     this.supercellPicker = new SupercellPickerModal(this);
     this.statsModal = new StatsModal(this);
 
+    this.initHudRefs();
     this.initLoadingScreen();
     this.initGlobalEvents();
     this.initUiSounds();
@@ -292,6 +297,32 @@ export class GameEngine {
   }
 
   // ---------------------------------------------------------------
+  // HUD REF CACHE: per-frame DOM lookups cost a full-document scan
+  // each time; cache every element touched inside the frame loop once.
+  // ---------------------------------------------------------------
+  initHudRefs() {
+    const id = (k) => document.getElementById(k);
+    this.hud = {
+      targetDist: id('target-distance'),
+      reticleRange: id('reticle-range'),
+      hpBar: id('player-hp-bar'),
+      hpGhost: id('player-hp-ghost'),
+      hpText: id('player-hp-text'),
+      xpBar: id('player-xp-bar'),
+      xpText: id('player-xp-text'),
+      hudLevel: id('hud-level'),
+      hudWorld: id('hud-world-level'),
+      hudPoints: id('hud-stat-points'),
+      statsBadge: id('stats-badge-hint'),
+      specialRow: id('special-bar-row'),
+      specialLabel: id('special-bar-label'),
+      specialBar: id('player-special-bar'),
+      specialText: id('player-special-text'),
+      buffs: id('buffs-container'),
+    };
+  }
+
+  // ---------------------------------------------------------------
   // LOADING SCREEN: cinematic entry with PLAY + SETTINGS
   // ---------------------------------------------------------------
   initLoadingScreen() {
@@ -372,6 +403,18 @@ export class GameEngine {
         work: () => {
           if (this.renderer && typeof this.renderer.compileAsync === 'function') {
             Promise.resolve(this.renderer.compileAsync(this.scene, this.camera)).catch(() => {});
+          }
+        },
+      },
+      {
+        label: 'VFX ARMORY PRE-WARM // ALL FRUIT EFFECTS',
+        work: () => {
+          // Synchronously warm every pooled VFX program (debris instancing,
+          // rings, domes, arc webs, crack webs, fire columns, siren domes,
+          // cloud puffs, vortices, beams) so the first cast never hitches.
+          if (this.explosions && this.explosions.preflight) {
+            const n = this.explosions.preflight(this.renderer, this.camera);
+            return ` ${n} EFFECTS`;
           }
         },
       },
@@ -490,39 +533,39 @@ export class GameEngine {
    */
   updateLevelHUD() {
     const p = this.player;
-    const lvlEl = document.getElementById('hud-level');
-    const xpBar = document.getElementById('player-xp-bar');
-    const xpText = document.getElementById('player-xp-text');
-    const spEl = document.getElementById('hud-stat-points');
-    const worldEl = document.getElementById('hud-world-level');
+    const h = this.hud;
 
-    if (lvlEl) {
+    if (h.hudLevel) {
       const label = `LVL ${formatNumber(p.level)}`;
-      if (lvlEl.textContent !== label) {
-        lvlEl.textContent = label;
+      if (h.hudLevel.textContent !== label) {
+        h.hudLevel.textContent = label;
         // 3D flip when the level actually changes
-        lvlEl.classList.remove('badge-flip');
-        void lvlEl.offsetWidth;
-        lvlEl.classList.add('badge-flip');
+        h.hudLevel.classList.remove('badge-flip');
+        void h.hudLevel.offsetWidth;
+        h.hudLevel.classList.add('badge-flip');
       }
     }
-    if (xpBar && xpText) {
+    if (h.xpBar && h.xpText) {
       const need = p.xpNeeded();
       const pct = need > 0 ? Math.min(100, (p.xp / need) * 100) : 100;
-      xpBar.style.width = `${pct}%`;
-      xpText.textContent = `${formatNumber(p.xp)} / ${formatNumber(need)} XP`;
+      h.xpBar.style.width = `${pct}%`;
+      const xpLabel = `${formatNumber(p.xp)} / ${formatNumber(need)} XP`;
+      if (h.xpText.textContent !== xpLabel) h.xpText.textContent = xpLabel;
     }
-    if (spEl) {
-      spEl.textContent = `${p.statPoints} PTS`;
-      spEl.classList.toggle('stat-points-ready', p.statPoints > 0);
+    if (h.hudPoints) {
+      const ptsLabel = `${p.statPoints} PTS`;
+      if (h.hudPoints.textContent !== ptsLabel) h.hudPoints.textContent = ptsLabel;
+      h.hudPoints.classList.toggle('stat-points-ready', p.statPoints > 0);
     }
     // STATS button corner badge
-    const badge = document.getElementById('stats-badge-hint');
-    if (badge) {
-      badge.textContent = p.statPoints;
-      badge.style.display = p.statPoints > 0 ? 'flex' : 'none';
+    if (h.statsBadge) {
+      h.statsBadge.textContent = p.statPoints;
+      h.statsBadge.style.display = p.statPoints > 0 ? 'flex' : 'none';
     }
-    if (worldEl) worldEl.textContent = `WORLD ${this.enemies.worldLevel}`;
+    if (h.hudWorld) {
+      const wLabel = `WORLD ${this.enemies.worldLevel}`;
+      if (h.hudWorld.textContent !== wLabel) h.hudWorld.textContent = wLabel;
+    }
 
     // Low-HP screen pulse
     document.body.classList.toggle('low-hp', p.hp > 0 && (p.hp / p.maxHp) < 0.25);
@@ -765,15 +808,14 @@ export class GameEngine {
     this.updateLevelHUD();
 
     // Player HP Bar + damage-lag ghost bar (eases down behind real HP)
-    const hpBar = document.getElementById('player-hp-bar');
-    const hpGhost = document.getElementById('player-hp-ghost');
-    const hpText = document.getElementById('player-hp-text');
-    if (hpBar && hpText) {
+    const h = this.hud;
+    if (h.hpBar && h.hpText) {
       const pct = (this.player.hp / this.player.maxHp) * 100;
-      hpBar.style.width = `${pct}%`;
-      hpText.textContent = `${Math.round(this.player.hp)} / ${this.player.maxHp}`;
+      h.hpBar.style.width = `${pct}%`;
+      const hpLabel = `${Math.round(this.player.hp)} / ${this.player.maxHp}`;
+      if (h.hpText.textContent !== hpLabel) h.hpText.textContent = hpLabel;
     }
-    if (hpGhost) {
+    if (h.hpGhost) {
       if (this._hpGhostPct === undefined) this._hpGhostPct = 100;
       const target = (this.player.hp / this.player.maxHp) * 100;
       if (target >= this._hpGhostPct) {
@@ -787,50 +829,66 @@ export class GameEngine {
           if (this._hpGhostPct - target < 0.4) this._hpGhostTimer = now;
         }
       }
-      hpGhost.style.width = `${this._hpGhostPct}%`;
+      h.hpGhost.style.width = `${this._hpGhostPct}%`;
     }
 
-    // Special Boost / Charge Bar
-    const specialRow = document.getElementById('special-bar-row');
-    const specialBar = document.getElementById('player-special-bar');
-    const specialText = document.getElementById('player-special-text');
-    const specialLabel = document.getElementById('special-bar-label');
-
-    if (this.equippedSword === 'gravity_blade') {
-      if (specialRow) specialRow.style.display = 'flex';
-      if (specialLabel) specialLabel.textContent = 'BLADE';
-      if (specialBar) specialBar.style.width = `${this.player.gravityBladeCharge}%`;
-      if (specialText) specialText.textContent = `${this.player.gravityBladeCharge}%`;
-    } else if (this.player.buffs.iceBombard.active) {
-      if (specialRow) specialRow.style.display = 'flex';
-      if (specialLabel) specialLabel.textContent = 'ICE BOMB';
-      const pct = (this.player.buffs.iceBombard.timer / 15.0) * 100;
-      if (specialBar) specialBar.style.width = `${pct}%`;
-      if (specialText) specialText.textContent = `${this.player.buffs.iceBombard.timer.toFixed(1)}s`;
-    } else if (this.player.buffs.hellFury.active) {
-      if (specialRow) specialRow.style.display = 'flex';
-      if (specialLabel) specialLabel.textContent = 'HELL FURY';
-      const pct = (this.player.buffs.hellFury.timer / 10.0) * 100;
-      if (specialBar) specialBar.style.width = `${pct}%`;
-      if (specialText) specialText.textContent = `${this.player.buffs.hellFury.timer.toFixed(1)}s`;
-    } else {
-      if (specialRow) specialRow.style.display = 'none';
+    // Special Boost / Charge Bar (cached refs, label written only on change)
+    if (h.specialRow) {
+      if (this.equippedSword === 'gravity_blade') {
+        if (h.specialRow.style.display !== 'flex') h.specialRow.style.display = 'flex';
+        if (h.specialLabel) this._setLabel(h.specialLabel, 'BLADE');
+        if (h.specialBar) h.specialBar.style.width = `${this.player.gravityBladeCharge}%`;
+        if (h.specialText) h.specialText.textContent = `${this.player.gravityBladeCharge}%`;
+      } else if (this.player.buffs.iceBombard.active) {
+        if (h.specialRow.style.display !== 'flex') h.specialRow.style.display = 'flex';
+        if (h.specialLabel) this._setLabel(h.specialLabel, 'ICE BOMB');
+        if (h.specialBar) h.specialBar.style.width = `${(this.player.buffs.iceBombard.timer / 15.0) * 100}%`;
+        if (h.specialText) h.specialText.textContent = `${this.player.buffs.iceBombard.timer.toFixed(1)}s`;
+      } else if (this.player.buffs.hellFury.active) {
+        if (h.specialRow.style.display !== 'flex') h.specialRow.style.display = 'flex';
+        if (h.specialLabel) this._setLabel(h.specialLabel, 'HELL FURY');
+        if (h.specialBar) h.specialBar.style.width = `${(this.player.buffs.hellFury.timer / 10.0) * 100}%`;
+        if (h.specialText) h.specialText.textContent = `${this.player.buffs.hellFury.timer.toFixed(1)}s`;
+      } else if (h.specialRow.style.display !== 'none') {
+        h.specialRow.style.display = 'none';
+      }
     }
 
-    // Buffs list chips
-    const buffsContainer = document.getElementById('buffs-container');
-    if (buffsContainer) {
-      buffsContainer.innerHTML = '';
-      for (const k in this.player.buffs) {
-        const b = this.player.buffs[k];
-        if (b.active) {
-          const chip = document.createElement('span');
-          chip.className = 'buff-chip';
-          chip.textContent = `${k.toUpperCase()} [${b.timer.toFixed(1)}s]`;
-          buffsContainer.appendChild(chip);
+    // Buffs list chips: chips are REUSED (keyed by buff name) and only
+    // rewritten when their visible text actually changes (10Hz throttle).
+    if (h.buffs) {
+      this._buffTimer = (this._buffTimer || 0) - dt;
+      if (this._buffTimer <= 0) {
+        this._buffTimer = 0.1;
+        if (!this._buffChips) this._buffChips = new Map();
+        const seen = new Set();
+        for (const k in this.player.buffs) {
+          const b = this.player.buffs[k];
+          if (!b.active) {
+            const old = this._buffChips.get(k);
+            if (old) {
+              old.parentElement && old.parentElement.removeChild(old);
+              this._buffChips.delete(k);
+            }
+            continue;
+          }
+          seen.add(k);
+          let chip = this._buffChips.get(k);
+          if (!chip) {
+            chip = document.createElement('span');
+            chip.className = 'buff-chip';
+            h.buffs.appendChild(chip);
+            this._buffChips.set(k, chip);
+          }
+          const label = `${k.toUpperCase()} [${b.timer.toFixed(1)}s]`;
+          if (chip.textContent !== label) chip.textContent = label;
         }
       }
     }
+  }
+
+  _setLabel(el, label) {
+    if (el.textContent !== label) el.textContent = label;
   }
 
   animate() {
@@ -840,17 +898,23 @@ export class GameEngine {
     const startTime = performance.now();
 
     // 1. Calculate Mouse Raycast onto Ground Floor & Aim Target
+    // (pre-allocated intersection scratch - setAimTarget copies it)
     this.raycaster.setFromCamera(this.mouseNDC, this.camera);
-    const intersectPoint = new THREE.Vector3();
-    if (this.raycaster.ray.intersectPlane(this.groundPlane, intersectPoint)) {
+    if (this.raycaster.ray.intersectPlane(this.groundPlane, this._intersectPoint)) {
+      const intersectPoint = this._intersectPoint;
       this.player.setAimTarget(intersectPoint);
 
-      // Distance to target in meters
+      // Distance to target in meters (cached refs, throttled to 10Hz
+      // so text writes don't churn every frame)
       const distMeters = this.player.position.distanceTo(intersectPoint);
-      const targetDistEl = document.getElementById('target-distance');
-      const reticleRangeEl = document.getElementById('reticle-range');
-      if (targetDistEl) targetDistEl.textContent = `${distMeters.toFixed(1)} M`;
-      if (reticleRangeEl) reticleRangeEl.textContent = `RANGE: ${distMeters.toFixed(1)} M`;
+      if (!this._hudDistTimer || this._hudDistTimer <= 0) {
+        this._hudDistTimer = 0.1;
+        const d = distMeters.toFixed(1);
+        if (this.hud.targetDist) this.hud.targetDist.textContent = `${d} M`;
+        if (this.hud.reticleRange) this.hud.reticleRange.textContent = `RANGE: ${d} M`;
+      } else {
+        this._hudDistTimer -= dt;
+      }
     }
 
     // 2. Gun cooldown tick

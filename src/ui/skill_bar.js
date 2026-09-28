@@ -91,6 +91,9 @@ export class SkillBarUI {
 
   refresh() {
     this.listEl.innerHTML = '';
+    // Rebuild the per-skill element reference cache (no getElementById
+    // in the per-frame cooldown update loop)
+    this.elRefs = new Map();
 
     const fruitId = this.game.equippedFruit;
     const swordId = this.game.equippedSword;
@@ -198,6 +201,7 @@ export class SkillBarUI {
       });
 
       this.listEl.appendChild(row);
+      this.elRefs.set(skill.id, { row, fill, readout: cdReadout });
     });
   }
 
@@ -244,28 +248,24 @@ export class SkillBarUI {
       if (cd.current > 0) {
         cd.current = Math.max(0, cd.current - dt);
 
-        // Update Cooldown 100% to 0% fill overlay
-        const fillEl = document.getElementById(`cd-fill-${skillId}`);
-        const cdReadout = document.getElementById(`cd-readout-${skillId}`);
-
-        if (fillEl && cdReadout) {
+        // Update Cooldown 100% to 0% fill overlay (cached refs)
+        const refs = this.elRefs && this.elRefs.get(skillId);
+        if (refs) {
           const pct = (cd.current / cd.total) * 100;
-          fillEl.style.width = `${pct}%`;
+          refs.fill.style.width = `${pct}%`;
 
           if (cd.current > 0) {
-            cdReadout.textContent = `${cd.current.toFixed(1)}s`;
-            cdReadout.classList.add('on-cd');
+            const label = `${cd.current.toFixed(1)}s`;
+            if (refs.readout.textContent !== label) refs.readout.textContent = label;
+            if (!refs.readout.classList.contains('on-cd')) refs.readout.classList.add('on-cd');
           } else {
-            cdReadout.textContent = 'READY';
-            cdReadout.classList.remove('on-cd');
-            fillEl.style.width = '0%';
+            refs.readout.textContent = 'READY';
+            refs.readout.classList.remove('on-cd');
+            refs.fill.style.width = '0%';
             // READY ping: flash the row once the cooldown completes
-            const rowEl = document.getElementById(`skill-bar-${skillId}`);
-            if (rowEl) {
-              rowEl.classList.remove('ready-ping');
-              void rowEl.offsetWidth;
-              rowEl.classList.add('ready-ping');
-            }
+            refs.row.classList.remove('ready-ping');
+            void refs.row.offsetWidth;
+            refs.row.classList.add('ready-ping');
             if (this.game && this.game.sound && this.game.sound.playUiBeep) {
               this.game.sound.playUiBeep(1320);
             }
