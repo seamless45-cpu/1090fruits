@@ -134,6 +134,27 @@ ok('Spawned all 7 explosion types + full weather suite');
   ok(`GPU volumetric cloud: ${weather.activeClouds.length} clouds = ${weather.activeClouds.length} draw calls (0 sprite billboards)`);
 }
 
+// Round 8: precipitation must be VISIBLE - textured drop Points per shaft,
+// buffer synced with the falling drops each frame
+{
+  const shaft = weather.createRainshaft(new THREE.Vector3(0, 0, 0), 100, 120, 400);
+  if (!(shaft.drops instanceof THREE.Points)) throw new Error('rainshaft has no precipitation Points');
+  if (!shaft.drops.geometry.attributes.position) throw new Error('precipitation buffer missing');
+  if (!shaft.dropMat.map) throw new Error('precipitation Points have no streak texture');
+  // sync the buffer, then snapshot drop y-positions and confirm they fall
+  weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  const i3 = 5 * 3;
+  const y0 = shaft.dropPos[i3 + 1];
+  for (let i = 0; i < 20; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  const y1 = shaft.dropPos[i3 + 1];
+  if (y1 >= y0) throw new Error(`precipitation not falling (y ${y0} -> ${y1})`);
+  if (shaft.dropMat.opacity <= 0) throw new Error('precipitation fully transparent');
+  ok(`Precipitation Points live: 400 drops falling (${y0.toFixed(1)}m -> ${y1.toFixed(1)}m), streak texture bound`);
+  // Let the shaft expire to keep the scene tidy
+  shaft.duration = 0.01;
+  weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+}
+
 // Round 7: hail physics + shatter damage + expiry
 {
   enemies.spawnDummy(new THREE.Vector3(120, 0, 120));
@@ -168,7 +189,7 @@ ok('Spawned all 7 explosion types + full weather suite');
   if (Math.abs(hur.cells[0].orbit.angle - ang0) < 0.05) throw new Error('hurricane cells are not orbiting');
 
   const wall = weather.spawnWallCloud(new THREE.Vector3(0, 0, 250), 50, 8, 0.6);
-  if (wall.altitude !== 55 || wall.flat !== 0.62) throw new Error('wall cloud shaping options not applied');
+  if (wall.altitude !== 75 || wall.flat !== 0.62) throw new Error('wall cloud shaping options not applied');
   ok(`Squall line + hurricane orbit + wall cloud all simulate (${line[0].pos.x.toFixed(0)}m drift, orbit Δ${(hur.cells[0].orbit.angle - ang0).toFixed(2)}rad)`);
 }
 

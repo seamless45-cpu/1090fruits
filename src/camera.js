@@ -27,11 +27,11 @@ export class CameraController {
     this.camera = camera;
     this.domElement = domElement;
 
-    // Zoom limits strictly calibrated to 300 meters max range
+    // Zoom limits (Round 8: wide tactical range so whole storms read)
     this.minZoom = 3.0; // 3 meters (close over-shoulder)
-    this.maxZoom = 300.0; // 300 meters (maximum orbital tactical distance)
-    this.targetZoom = 28.0; // Default third person distance
-    this.currentZoom = 28.0;
+    this.maxZoom = 700.0; // 700 meters (maximum orbital tactical distance)
+    this.targetZoom = 42.0; // Default third person distance
+    this.currentZoom = 42.0;
 
     // Orbit angles
     this.targetPitch = 0.35; // radians (elevation angle)

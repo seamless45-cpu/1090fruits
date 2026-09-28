@@ -37,13 +37,15 @@ export class GameEngine {
 
     // 1. Three.js Scene, Camera, Renderer
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0x0a1420, 0.0016);
-    // Round 7: storm lighting extension (arena.setStormLevel lerps to these)
-    this.scene.fog.densityBase = 0.0016;
+    // Round 8: wide open atmosphere - lower base fog so the far storm is
+    // readable; storms thicken it via arena.setStormLevel.
+    this.scene.fog = new THREE.FogExp2(0x0a1420, 0.0011);
+    this.scene.fog.densityBase = 0.0011;
     this.scene.fog.colorStorm = new THREE.Color(0x151b28);
 
     const aspect = window.innerWidth / window.innerHeight;
-    this.camera = new THREE.PerspectiveCamera(58, aspect, 0.2, 1200);
+    // Round 8: cinematic wide FOV + long far plane for the big sky
+    this.camera = new THREE.PerspectiveCamera(70, aspect, 0.2, 1800);
     window.__activeCamera = this.camera;
 
     this.renderer = new THREE.WebGLRenderer({

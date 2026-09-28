@@ -1412,14 +1412,14 @@ export const SKILL_DATABASE = {
           const target = ctx.player.aimTarget;
           // ONE-PIECE CINEMATIC: rotating wall cloud under a supercell,
           // with the condensation funnel dropped below it.
-          ctx.weather.spawnWallCloud(target, 55, 12, 0.55);
-          ctx.weather.spawnGrowingCloud(target, true, 170, {
+          ctx.weather.spawnWallCloud(target, 70, 12, 0.55);
+          ctx.weather.spawnGrowingCloud(target, true, 230, {
             startStage: 'cumulonimbus', maxStage: 'supercell',
             growthDuration: 3.0, lifeDuration: 14,
           });
-          ctx.weather.createTornado(target, 8, 160, 200, 10.0);
+          ctx.weather.createTornado(target, 9, 190, 220, 10.0);
           // visible swirling suction vortex at the ground
-          ctx.explosions.vortex(target, 0x99ccff, 14.0, 9.5);
+          ctx.explosions.vortex(target, 0x99ccff, 18.0, 9.5);
           ctx.cameraController.addShake(target, 2.5, 2.0);
         }
       },
@@ -1438,11 +1438,11 @@ export const SKILL_DATABASE = {
             const eye = ctx.player.position.clone();
             // ONE-PIECE CINEMATIC: a full hurricane disc - a ring of orbiting
             // eyewall supercells around a calm eye + eyewall rain ring.
-            ctx.weather.spawnHurricane(eye, 95, 16);
+            ctx.weather.spawnHurricane(eye, 140, 18);
             ctx.cameraController.addShake(ctx.player.position, 5.0, 5.0);
             // colossal eyewall suction vortex at the eye
-            ctx.explosions.vortex(eye, 0x88bbee, 30.0, 14.0);
-            ctx.explosions.megaShockwave(eye, 150.0, 0x66aaff);
+            ctx.explosions.vortex(eye, 0x88bbee, 42.0, 15.0);
+            ctx.explosions.megaShockwave(eye, 220.0, 0x66aaff);
           }, 1000);
         }
       },
@@ -1479,14 +1479,14 @@ export const SKILL_DATABASE = {
             const a = (i / 5) * Math.PI * 2;
             const r = 50 + i * 30;
             const off = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
-            ctx.weather.spawnGrowingCloud(p.clone().add(off), false, 140, {
-              altitude: 62, flat: 0.40,
+            ctx.weather.spawnGrowingCloud(p.clone().add(off), false, 150, {
+              altitude: 85, flat: 0.40,
               startStage: 'congestus', maxStage: 'congestus',
               growthDuration: 2.0, lifeDuration: 22, particles: 900,
               rainOnSpawn: i < 3,
             });
           }
-          ctx.weather.createRainshaft(p, 260, 120, 700);
+          ctx.weather.createRainshaft(p, 300, 130, 800);
         }
       },
       {

@@ -199,6 +199,35 @@ function makeCurtainTexture() {
   return tex;
 }
 
+function makeRainStreakTexture() {
+  // Single raindrop: narrow vertical streak with soft ends (for the
+  // precipitation Points). Rendered into a 64x64 canvas with alpha so
+  // each Point reads as one visible falling drop, not a square.
+  const size = 64;
+  const cv = document.createElement('canvas');
+  cv.width = size; cv.height = size;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const halfW = 2.6; // streak half-width in px
+  for (let y = 0; y < size; y++) {
+    // Vertical envelope: soft head/tail, bright mid-body
+    const t = y / (size - 1);
+    const env = Math.sin(t * Math.PI); // 0 at both ends
+    const head = t < 0.28 ? 1.0 : 0.72; // slightly brighter head
+    for (let x = 0; x < size; x++) {
+      const d = Math.abs(x - (size - 1) / 2);
+      const across = d < halfW ? 1.0 : (d < halfW + 1.4 ? (halfW + 1.4 - d) / 1.4 : 0);
+      const a = Math.floor(255 * env * head * across);
+      const i = (y * size + x) * 4;
+      img.data[i] = 214; img.data[i + 1] = 230; img.data[i + 2] = 255; img.data[i + 3] = a;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 // Built once per page load (shared across managers)
 let WEATHER_TEX = null;
 export function precomputeWeatherTextures() {
@@ -208,6 +237,7 @@ export function precomputeWeatherTextures() {
     vortex: makeVortexTexture(),
     dust: makeDustTexture(),
     curtain: makeCurtainTexture(),
+    rainStreak: makeRainStreakTexture(),
   };
   return WEATHER_TEX;
 }
@@ -260,15 +290,39 @@ class RainShaft {
     geo.setAttribute('position', posAttr);
 
     this.mat = new THREE.LineBasicMaterial({
-      color: 0xcfe3f5,
+      color: 0xd8ebff,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.55,
       depthWrite: false,
       fog: false,
     });
     this.lines = new THREE.LineSegments(geo, this.mat);
     this.lines.frustumCulled = false;
     this.scene.add(this.lines);
+
+    // Round 8: visible precipitation - every drop also renders as a
+    // textured streak Point (sizeAttenuated). LineBasicMaterial is 1px on
+    // high-DPI displays and was invisible; the Points give real, readable
+    // rain at every zoom distance. ONE draw call for all drops.
+    this.dropPos = new Float32Array(count * 3);
+    this.dropGeo = new THREE.BufferGeometry();
+    const dAttr = new THREE.BufferAttribute(this.dropPos, 3);
+    dAttr.setUsage(THREE.DynamicDrawUsage);
+    this.dropGeo.setAttribute('position', dAttr);
+    this.dropMat = new THREE.PointsMaterial({
+      map: tex.rainStreak,
+      color: 0xdcecff,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false,
+      size: 4.5, // world-meter streak length
+      sizeAttenuation: true,
+      fog: false,
+    });
+    this.drops = new THREE.Points(this.dropGeo, this.dropMat);
+    this.drops.frustumCulled = false;
+    this.drops.renderOrder = 1;
+    this.scene.add(this.drops);
 
     // Rain curtain sheets (scrolling streak texture) - the visible "shaft"
     this.curtainGroup = new THREE.Group();
@@ -277,14 +331,14 @@ class RainShaft {
     this.curtainTex.needsUpdate = true;
     this.curtainTex.wrapS = THREE.RepeatWrapping;
     this.curtainTex.wrapT = THREE.RepeatWrapping;
-    this.curtainTex.repeat.set(3, 4);
+    this.curtainTex.repeat.set(5, 6);
     const sheetW = width * 0.85;
     const sheetH = height * 0.92;
     this.curtainMat = new THREE.MeshBasicMaterial({
       map: this.curtainTex,
-      color: 0x9fc4e0,
+      color: 0xaac9e6,
       transparent: true,
-      opacity: 0.1,
+      opacity: 0.3,
       side: THREE.DoubleSide,
       depthWrite: false,
       fog: false,
@@ -363,8 +417,9 @@ class RainShaft {
     this.elapsed += dt;
     const lifeT = this.elapsed / this.duration;
     const env = Math.min(1, lifeT * 5) * Math.min(1, (1 - lifeT) * 4);
-    this.mat.opacity = 0.34 * env;
-    this.curtainMat.opacity = 0.1 * env;
+    this.mat.opacity = 0.55 * env;
+    this.curtainMat.opacity = 0.3 * env;
+    this.dropMat.opacity = 0.6 * env;
     this.curtainTex.offset.y -= dt * 1.6; // rain scrolling down the sheets
     this.curtainGroup.rotation.y += dt * 0.15;
 
@@ -387,9 +442,10 @@ class RainShaft {
     if (dx !== 0 || dz !== 0) {
       const pos = this.positions;
       for (let i = 0; i < this.count; i++) {
-        const i6 = i * 6;
+        const i6 = i * 6, i3 = i * 3;
         pos[i6] += dx; pos[i6 + 2] += dz;
         pos[i6 + 3] += dx; pos[i6 + 5] += dz;
+        this.dropPos[i3] += dx; this.dropPos[i3 + 2] += dz;
       }
       this.curtainGroup.position.x += dx;
       this.curtainGroup.position.z += dz;
@@ -398,12 +454,16 @@ class RainShaft {
     }
 
     const pos = this.positions;
-    const streak = 0.03; // seconds of velocity visualized as streak length
+    const streak = 0.05; // seconds of velocity visualized as streak length
     for (let i = 0; i < this.count; i++) {
-      const i6 = i * 6;
+      const i6 = i * 6, i3 = i * 3;
       pos[i6 + 0] += this.velX[i] * dt;
       pos[i6 + 1] += this.velY[i] * dt;
       pos[i6 + 2] += this.velZ[i] * dt;
+      // Mirror the top vertex into the precipitation Points buffer
+      this.dropPos[i3] = pos[i6];
+      this.dropPos[i3 + 1] = pos[i6 + 1];
+      this.dropPos[i3 + 2] = pos[i6 + 2];
 
       const topY = pos[i6 + 1];
       const botY = topY + this.velY[i] * streak;
@@ -421,6 +481,7 @@ class RainShaft {
       pos[i6 + 5] = pos[i6 + 2] - this.velZ[i] * streak;
     }
     this.lines.geometry.attributes.position.needsUpdate = true;
+    this.dropGeo.attributes.position.needsUpdate = true;
 
     // Mist drift + fade (single Points buffer, in-place)
     {
@@ -436,11 +497,14 @@ class RainShaft {
 
   dispose() {
     this.scene.remove(this.lines);
+    this.scene.remove(this.drops);
     this.scene.remove(this.curtainGroup);
     this.mat.dispose();
+    this.dropMat.dispose();
     this.curtainMat.dispose();
     this.curtainTex.dispose();
     this.lines.geometry.dispose();
+    this.dropGeo.dispose();
     if (this.curtainMesh) this.curtainMesh.geometry.dispose();
     this.scene.remove(this.mist);
     this.mistGeo.dispose();
@@ -960,7 +1024,7 @@ class CloudField {
       fog: false,
       uniforms: {
         uTime: { value: 0 },
-        uRadius: { value: 45 },
+        uRadius: { value: 55 },
         uFlat: { value: 1.0 },
         uChurn: { value: 0.55 },
         uSpin: { value: 0.035 },
@@ -972,7 +1036,7 @@ class CloudField {
         uColorTop: { value: new THREE.Color(0xf4f8fc) },
         uColorBase: { value: new THREE.Color(0x9aa7b8) },
         uOpacity: { value: 0.66 },
-        uFogDensity: { value: 0.0016 },
+        uFogDensity: { value: 0.0011 },
         uFogColor: { value: new THREE.Color(0x0a1420) },
       },
     });
@@ -1031,7 +1095,7 @@ class Cloud {
     // Movement / shaping options
     this.vel = opts.vel ? opts.vel.clone() : null;      // moving clouds (squall line, derecho)
     this.orbit = opts.orbit || null;                     // { center, radius, speed, angle }
-    this.altitude = opts.altitude != null ? opts.altitude : 90;
+    this.altitude = opts.altitude != null ? opts.altitude : 120;
     this.flat = opts.flat != null ? opts.flat : 1.0;     // vertical squash (nimbostratus deck)
     this.spinOverride = opts.spin != null ? opts.spin : null; // wall clouds
     this.anvilSpread = 1.0;
@@ -1054,7 +1118,7 @@ class Cloud {
     if (this.rainOnSpawn) {
       this.rainshaftActive = true;
       const rs = this.manager.createRainshaftInternal(
-        this.pos, this.maxRadius * 0.7, 90, 380, true,
+        this.pos, this.maxRadius * 0.7, this.altitude, 500, true,
         this.vel ? { vel: this.vel, duration: this.lifeDuration } : { duration: this.lifeDuration });
       if (this.orbit) rs.orbit = this.orbit; // eyewall rain follows the cell
     }
@@ -1133,7 +1197,8 @@ class Cloud {
       if (growthT > 0.8) this.setStage(stages[stages.length - 1]);
       if (!this.rainshaftActive) {
         this.rainshaftActive = true;
-        this.manager.createRainshaftInternal(this.pos, this.maxRadius * 0.6, 90, 380);
+        // Rain falls from the cloud base (altitude), not a fixed height
+        this.manager.createRainshaftInternal(this.pos, this.maxRadius * 0.6, this.altitude, 500);
       }
     }
 
@@ -1388,7 +1453,7 @@ class HailField {
     const a = Math.random() * Math.PI * 2;
     const r = Math.sqrt(Math.random()) * this.radius * 0.55;
     this.px[slot] = this.center.x + Math.cos(a) * r;
-    this.py[slot] = 70 + Math.random() * 40;
+    this.py[slot] = 95 + Math.random() * 45;
     this.pz[slot] = this.center.z + Math.sin(a) * r;
     this.vx[slot] = this.windX + (Math.random() - 0.5) * 6;
     this.vy[slot] = -(18 + Math.random() * 12);
@@ -1608,7 +1673,7 @@ export class CloudWeatherManager {
    */
   spawnWallCloud(pos, radius = 40, duration = 12, spin = 0.5) {
     return this.spawnGrowingCloud(pos, true, radius, {
-      altitude: 55, flat: 0.62, spin,
+      altitude: 75, flat: 0.62, spin,
       startStage: 'supercell', maxStage: 'supercell',
       growthDuration: 1.5, lifeDuration: duration,
       particles: 700, rainOnSpawn: true,
@@ -1632,19 +1697,19 @@ export class CloudWeatherManager {
         eyeCenter.z + Math.sin(angle) * ringRadius);
       cells.push(this.spawnGrowingCloud(p, true, 60, {
         orbit,
-        altitude: 80,
+        altitude: 110,
         startStage: 'supercell', maxStage: 'supercell',
         growthDuration: 2.5, lifeDuration: duration,
         particles: 750,
       }));
     }
-    // Eyewall rain ring: 4 dense shafts on the ring
-    for (let i = 0; i < 4; i++) {
-      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    // Eyewall rain ring: 6 dense shafts on the ring
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
       const p = new THREE.Vector3(
         eyeCenter.x + Math.cos(a) * ringRadius, 0,
         eyeCenter.z + Math.sin(a) * ringRadius);
-      this.createRainshaft(p, 46, 150, 380);
+      this.createRainshaft(p, 50, 130, 520);
     }
     return { center: eyeCenter, cells, ringRadius, duration };
   }
