@@ -21,6 +21,11 @@ const VERTICES_PER_BOLT = (MAX_SEGMENTS - 1) * 2;
 const FLASH_LIGHT_POOL = 8;
 const GROUND_FLASH_POOL = 12;
 
+// Module scratch (pre-method): recalculateSegments re-derives the start->end
+// direction on every 10ms tick for every active bolt. Reusing one vector keeps
+// the hot path allocation-free.
+const _boltDir = new THREE.Vector3();
+
 /**
  * Realistic lightning flicker envelope.
  * Real strikes are NOT a single smooth fade - the return stroke fires,
@@ -134,7 +139,8 @@ class LightningBolt {
   recalculateSegments() {
     let idx = 0;
     const segs = this.segments;
-    const dir = new THREE.Vector3().subVectors(this.endPos, this.startPos);
+    // Module scratch: recalculateSegments runs every 10ms per active bolt
+    const dir = _boltDir.subVectors(this.endPos, this.startPos);
     const totalDist = dir.length();
 
     // Random-walk state (bounded drift around the ideal straight line)

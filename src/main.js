@@ -7,7 +7,7 @@ import { CameraController } from './camera.js';
 import { sound } from './audio.js';
 import { LightningManager } from './effects/lightning.js';
 import { ExplosionManager } from './effects/explosions.js';
-import { CloudWeatherManager } from './effects/clouds_weather.js';
+import { CloudWeatherManager, precomputeWeatherTextures } from './effects/clouds_weather.js';
 import { Arena } from './arena.js';
 import { Player } from './player.js';
 import { EnemyManager } from './enemies.js';
@@ -17,6 +17,11 @@ import { SettingsModal } from './ui/settings_modal.js';
 import { SupercellPickerModal } from './ui/supercell_picker.js';
 import { StatsModal } from './ui/stats_modal.js';
 import { formatNumber } from './utils.js';
+
+// Pre-allocated scratch for the passive-gun hot path (fires up to 20x/s in
+// buff states): all consumers copy/inspect the vectors immediately.
+const _gunTarget = new THREE.Vector3();
+const _gunWeapon = new THREE.Vector3();
 
 /**
  * 3D 1090 Fruits - Core Game Engine
@@ -291,6 +296,9 @@ export class GameEngine {
   // ---------------------------------------------------------------
   initLoadingScreen() {
     this.inGame = false;
+    this._bootDone = false;
+    this._bootFastForward = false;
+    this._bootAutoDeploy = false;
     const loading = document.getElementById('loading-screen');
     const playBtn = document.getElementById('btn-loading-play');
     const settingsBtn = document.getElementById('btn-loading-settings');
@@ -302,23 +310,127 @@ export class GameEngine {
       });
     }
 
+    const deploy = () => {
+      if (this.inGame) return;
+      this.inGame = true;
+      this.sound.init(); // ensure audio unlocked on this gesture
+      this.sound.playGameStart();
+
+      // Reveal the world: fade out the loader, animate the HUD in
+      document.body.classList.remove('pre-game');
+      document.body.classList.add('in-game');
+      if (loading) {
+        loading.classList.add('loading-exit');
+        setTimeout(() => { loading.style.display = 'none'; }, 900);
+      }
+      // Big cinematic deploy banner
+      this.showSkillBanner('DEPLOYED', '#00f0ff');
+    };
+
     if (playBtn) {
       playBtn.addEventListener('click', () => {
         if (this.inGame) return;
-        this.inGame = true;
-        this.sound.init(); // ensure audio unlocked on this gesture
-        this.sound.playGameStart();
-
-        // Reveal the world: fade out the loader, animate the HUD in
-        document.body.classList.remove('pre-game');
-        document.body.classList.add('in-game');
-        if (loading) {
-          loading.classList.add('loading-exit');
-          setTimeout(() => { loading.style.display = 'none'; }, 900);
+        if (!this._bootDone) {
+          // First press fast-forwards the boot sequence and auto-deploys
+          this._bootFastForward = true;
+          this._bootAutoDeploy = true;
+          this.sound.playUiClick();
+          return;
         }
-        // Big cinematic deploy banner
-        this.showSkillBanner('DEPLOYED', '#00f0ff');
+        deploy();
       });
+    }
+
+    this.runBootSequence(deploy);
+  }
+
+  // ---------------------------------------------------------------
+  // BOOT SEQUENCE: typed console lines interleaved with real
+  // pre-work ("pre-methods": textures pre-computed, shaders
+  // pre-compiled) so the first gameplay frames are allocation-free.
+  // ---------------------------------------------------------------
+  async runBootSequence(deploy) {
+    const linesEl = document.getElementById('loading-console-lines');
+    const fillEl = document.getElementById('loading-progress-fill');
+    const pctEl = document.getElementById('loading-progress-pct');
+    const playBtn = document.getElementById('btn-loading-play');
+    if (!playBtn) return;
+
+    const steps = [
+      { label: 'SYSTEM BOOT // 1090-FRUITS OPERATIVE PROTOCOL v3.0' },
+      { label: 'GPU LINK // WEBGL2 CONTEXT + PMREM ENV', work: () => this.renderer && this.renderer.render(this.scene, this.camera) },
+      {
+        label: 'PRE-COMPUTING CLOUD FIELD TEXTURES (FBM x4)',
+        work: () => {
+          const t0 = performance.now();
+          precomputeWeatherTextures();
+          return ` ${Math.max(1, Math.round(performance.now() - t0))}ms`;
+        },
+      },
+      {
+        label: 'PRE-COMPILING SHADER PROGRAMS (async)',
+        work: () => {
+          if (this.renderer && typeof this.renderer.compileAsync === 'function') {
+            Promise.resolve(this.renderer.compileAsync(this.scene, this.camera)).catch(() => {});
+          }
+        },
+      },
+      { label: 'WEATHER CORE // TORNADO · MICROBURST · TSUNAMI' },
+      { label: 'LIGHTNING FIELD // BRANCHED STRIKE ENGINE' },
+      { label: 'WEAPON BAY // 48 SKILLS + INVENTORY' },
+      { label: 'AUDIO SYNTH // UI + FX VOICES ARMED' },
+      { label: 'ALL SYSTEMS NOMINAL' },
+    ];
+
+    const wait = (ms) => new Promise((res) => setTimeout(res, this._bootFastForward ? 0 : ms));
+    let stepCount = 0;
+    const setProgress = (n) => {
+      const pct = Math.round((n / steps.length) * 100);
+      if (fillEl) fillEl.style.width = pct + '%';
+      if (pctEl) pctEl.textContent = pct + '%';
+    };
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const line = document.createElement('div');
+      line.className = 'boot-line';
+      if (linesEl) linesEl.appendChild(line);
+      // Keep only the last 7 lines visible
+      if (linesEl && linesEl.children.length > 7) linesEl.removeChild(linesEl.children[0]);
+
+      for (const ch of step.label) {
+        if (line) line.textContent += ch;
+        await wait(this._bootFastForward ? 0 : 7);
+      }
+      let tag = 'OK';
+      if (step.work) {
+        try { tag = (step.work() || 'OK').trim() || 'OK'; } catch (err) { tag = 'WARN'; console.warn('[boot]', err); }
+      }
+      if (line) {
+        line.textContent = step.label;
+        const span = document.createElement('span');
+        span.className = 'boot-tag';
+        span.textContent = '  [' + tag + ']';
+        line.appendChild(span);
+        line.classList.add('boot-line-ok');
+      }
+      stepCount++;
+      setProgress(stepCount);
+      await wait(this._bootFastForward ? 0 : 140);
+    }
+
+    this._bootDone = true;
+    playBtn.disabled = false;
+    playBtn.textContent = '▶ PLAY';
+    playBtn.classList.add('boot-ready');
+    if (this.sound.playUiBeep) {
+      this.sound.playUiBeep(660);
+      setTimeout(() => this.sound.playUiBeep(990), 130);
+    }
+
+    if (this._bootAutoDeploy) {
+      await wait(120);
+      deploy();
     }
   }
 
@@ -384,7 +496,16 @@ export class GameEngine {
     const spEl = document.getElementById('hud-stat-points');
     const worldEl = document.getElementById('hud-world-level');
 
-    if (lvlEl) lvlEl.textContent = `LVL ${formatNumber(p.level)}`;
+    if (lvlEl) {
+      const label = `LVL ${formatNumber(p.level)}`;
+      if (lvlEl.textContent !== label) {
+        lvlEl.textContent = label;
+        // 3D flip when the level actually changes
+        lvlEl.classList.remove('badge-flip');
+        void lvlEl.offsetWidth;
+        lvlEl.classList.add('badge-flip');
+      }
+    }
     if (xpBar && xpText) {
       const need = p.xpNeeded();
       const pct = need > 0 ? Math.min(100, (p.xp / need) * 100) : 100;
@@ -548,12 +669,12 @@ export class GameEngine {
 
     // Auto-aim target: closest enemy within 150m or mouse cursor
     const closest = this.enemies.findClosestEnemy(this.player.position, 150);
-    const targetPos = closest.enemy ? closest.enemy.mesh.position.clone() : this.player.aimTarget.clone();
+    const targetPos = _gunTarget.copy(closest.enemy ? closest.enemy.mesh.position : this.player.aimTarget);
     targetPos.y += 1.2;
 
     // Visible muzzle flash + tracer bolt (the gun "feels" like it fires)
     const beamColor = fruit === 'rimefracture' ? 0x9ff4ff : 0xffaa44;
-    const weaponPos = this.player.position.clone();
+    const weaponPos = _gunWeapon.copy(this.player.position);
     weaponPos.y = 1.55;
     // Front of the operative (local -Z rotated by body yaw)
     weaponPos.x -= Math.sin(this.player.group.rotation.y) * 0.5;
@@ -639,17 +760,34 @@ export class GameEngine {
     };
   }
 
-  updateHUDValues() {
+  updateHUDValues(dt = 1 / 60) {
     // Level / XP / Stat Points / World Level
     this.updateLevelHUD();
 
-    // Player HP Bar
+    // Player HP Bar + damage-lag ghost bar (eases down behind real HP)
     const hpBar = document.getElementById('player-hp-bar');
+    const hpGhost = document.getElementById('player-hp-ghost');
     const hpText = document.getElementById('player-hp-text');
     if (hpBar && hpText) {
       const pct = (this.player.hp / this.player.maxHp) * 100;
       hpBar.style.width = `${pct}%`;
       hpText.textContent = `${Math.round(this.player.hp)} / ${this.player.maxHp}`;
+    }
+    if (hpGhost) {
+      if (this._hpGhostPct === undefined) this._hpGhostPct = 100;
+      const target = (this.player.hp / this.player.maxHp) * 100;
+      if (target >= this._hpGhostPct) {
+        this._hpGhostPct = target; // heals snap up instantly
+      } else {
+        const now = performance.now();
+        if (this._hpGhostTimer === undefined) this._hpGhostTimer = now;
+        if (now - this._hpGhostTimer > 280) {
+          // drain the lag at ~13%/s after a short grace period
+          this._hpGhostPct = Math.max(target, this._hpGhostPct - 13 * dt);
+          if (this._hpGhostPct - target < 0.4) this._hpGhostTimer = now;
+        }
+      }
+      hpGhost.style.width = `${this._hpGhostPct}%`;
     }
 
     // Special Boost / Charge Bar
@@ -796,7 +934,7 @@ export class GameEngine {
 
     // 7. Update UI
     this.skillBar.update(dt);
-    this.updateHUDValues();
+    this.updateHUDValues(dt);
 
     // 8. Render Scene (through the bloom composer)
     this.composer.render();

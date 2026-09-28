@@ -13,6 +13,9 @@ import * as THREE from 'three';
  *  - Weapon attachments with emissive energy edges
  */
 
+// Pre-allocated shared unit vectors (pre-method: avoid per-frame allocs)
+const _V3_UP = new THREE.Vector3(0, 1, 0);
+
 const FRUIT_COLORS = {
   gravity: 0xb026ff,
   lightning: 0x00f0ff,
@@ -69,6 +72,10 @@ export class Player {
     // Movement & Physics
     this.position = new THREE.Vector3(0, 0, 0);
     this.velocity = new THREE.Vector3(0, 0, 0);
+    // Pre-allocated movement scratch (pre-method: zero per-frame allocations)
+    this._camDir = new THREE.Vector3();
+    this._camRight = new THREE.Vector3();
+    this._moveDir = new THREE.Vector3();
     this.moveSpeed = 16.0; // m/s
     this.isGrounded = true;
     this.dashCooldown = 0;
@@ -707,7 +714,7 @@ export class Player {
     this.dashCooldown = 0.5;
 
     // Dash in forward direction or movement vector
-    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.group.rotation.y);
+    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(_V3_UP, this.group.rotation.y);
     this.dashVelocity.copy(forward).multiplyScalar(customSpeed);
     this.dashTimer = 0.16;
     this.thrusterMat.color.setHex(0x88eeff);
@@ -805,7 +812,7 @@ export class Player {
     this.sound.playSlash(1.0 + this.comboStep * 0.2);
 
     // Energy arc sweeping the hit zone in front of the operative
-    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.group.rotation.y);
+    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(_V3_UP, this.group.rotation.y);
     const hitPos = this.position.clone().addScaledVector(forward, 3.2);
     hitPos.y = 1.4;
     this.spawnSlashTrail(hitPos);
@@ -845,15 +852,16 @@ export class Player {
     if (this.keys['KeyA']) moveX -= 1;
     if (this.keys['KeyD']) moveX += 1;
 
-    // Camera-relative forward and right vectors
-    const camDir = new THREE.Vector3();
+    // Camera-relative forward and right vectors (pre-allocated scratch)
+    const camDir = this._camDir;
     camera.getWorldDirection(camDir);
     camDir.y = 0;
     camDir.normalize();
 
-    const camRight = new THREE.Vector3().crossVectors(camDir, new THREE.Vector3(0, 1, 0)).normalize().negate();
+    const camRight = this._camRight.crossVectors(camDir, _V3_UP).normalize().negate();
 
-    const moveDir = new THREE.Vector3();
+    const moveDir = this._moveDir;
+    moveDir.set(0, 0, 0);
     this.isMoving = (moveX !== 0 || moveZ !== 0) && this.dashTimer <= 0;
     if (moveX !== 0 || moveZ !== 0) {
       moveDir.addScaledVector(camRight, moveX);

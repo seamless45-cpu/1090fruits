@@ -21,7 +21,10 @@
   ================================================================= -->
   <div id="loading-screen" class="loading-screen">
     <div class="loading-bg"></div>
-    <div class="loading-particles"></div>
+    <div class="loading-fog loading-fog-a"></div>
+    <div class="loading-fog loading-fog-b"></div>
+    <div class="loading-rain"></div>
+    <div class="loading-lightning"></div>
     <div class="loading-content">
       <div class="loading-logo">
         <div class="loading-logo-main">1090</div>
@@ -30,11 +33,16 @@
       </div>
       <div class="loading-ring"></div>
       <div class="loading-actions">
-        <button id="btn-loading-play" class="sci-btn btn-loading-play" type="button">▶ PLAY</button>
+        <button id="btn-loading-play" class="sci-btn btn-loading-play" type="button" disabled>INITIALIZING…</button>
         <button id="btn-loading-settings" class="sci-btn btn-loading-settings" type="button">⚙ SETTINGS</button>
       </div>
       <div class="loading-hint">WASD MOVE // MOUSE AIM // F G H SKILLS // SHIFT DASH // CLICK EQUIP IN INVENTORY</div>
     </div>
+    <div class="loading-console" id="loading-console">
+      <div class="loading-console-head"><span class="loading-console-dot"></span>// BOOT SEQUENCE <span id="loading-progress-pct">0%</span></div>
+      <div id="loading-console-lines"></div>
+    </div>
+    <div class="loading-progress"><div class="loading-progress-fill" id="loading-progress-fill"></div></div>
     <div class="loading-footer">3D 1090 FRUITS // OPERATIVE PROTOCOL v3.0</div>
   </div>
 
@@ -88,6 +96,7 @@
           <div class="bar-row">
             <span class="bar-label">HP</span>
             <div class="bar-track hp-track">
+              <div class="bar-fill hp-ghost" id="player-hp-ghost"></div>
               <div class="bar-fill hp-fill" id="player-hp-bar" style="width: 100%;"></div>
             </div>
             <span class="bar-val" id="player-hp-text">1000 / 1000</span>

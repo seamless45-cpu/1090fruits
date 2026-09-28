@@ -27,6 +27,8 @@ process.on('unhandledRejection', (e) => {
 const ctx2dStub = new Proxy({}, {
   get: (t, k) => {
     if (k === 'createRadialGradient' || k === 'createLinearGradient') return () => ({ addColorStop: () => {} });
+    if (k === 'createImageData') return (w, h) => ({ data: new Uint8ClampedArray((w || 256) * (h || 256) * 4), width: w || 256, height: h || 256 });
+    if (k === 'putImageData' || k === 'drawImage') return () => {};
     if (k === 'measureText') return () => ({ width: 10 });
     if (k === 'canvas') return { width: 256, height: 256 };
     if (k in t) return t[k];

@@ -259,6 +259,16 @@ export class SkillBarUI {
             cdReadout.textContent = 'READY';
             cdReadout.classList.remove('on-cd');
             fillEl.style.width = '0%';
+            // READY ping: flash the row once the cooldown completes
+            const rowEl = document.getElementById(`skill-bar-${skillId}`);
+            if (rowEl) {
+              rowEl.classList.remove('ready-ping');
+              void rowEl.offsetWidth;
+              rowEl.classList.add('ready-ping');
+            }
+            if (this.game && this.game.sound && this.game.sound.playUiBeep) {
+              this.game.sound.playUiBeep(1320);
+            }
           }
         }
       }

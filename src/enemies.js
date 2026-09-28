@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 
+// Pre-allocated scratch: Enemy.update() runs for every enemy every frame,
+// so the "direction to player" vector is reused instead of re-allocated.
+const _toPlayer = new THREE.Vector3();
+
 /**
  * 3D 1090 Fruits - Enemy Combat System (REMODELED ROSTER)
  *
@@ -620,7 +624,7 @@ export class Enemy {
 
       // Face the player + bank into the turn
       if (!frozen) {
-        const toPlayer = new THREE.Vector3().subVectors(player.position, this.mesh.position);
+        const toPlayer = _toPlayer.subVectors(player.position, this.mesh.position);
         const targetYaw = Math.atan2(toPlayer.x, toPlayer.z);
         let dy = targetYaw - this.mesh.rotation.y;
         while (dy > Math.PI) dy -= Math.PI * 2;
@@ -689,7 +693,7 @@ export class Enemy {
     const stopDist = this.type === 'boss' ? 12 : 3.5;
 
     if (distToPlayer > stopDist) {
-      const dir = new THREE.Vector3().subVectors(player.position, this.mesh.position);
+      const dir = _toPlayer.subVectors(player.position, this.mesh.position);
       dir.y = 0;
       dir.normalize();
       this.mesh.position.addScaledVector(dir, this.moveSpeed * dt);
