@@ -69,9 +69,12 @@ export class SupercellPickerModal {
     const pos = this.game.player.aimTarget.clone();
     pos.y = 0;
 
-    // Spawn supercell cloud
+    // Spawn supercell cloud - instantly mature (full size + supercell shader params)
     const cloud = this.game.weather.spawnGrowingCloud(pos, true, size);
-    cloud.stage = 'supercell'; // Instantly mature supercell
+    cloud.growthDone = true;
+    cloud.groupScale = 2.6;
+    cloud._applyScale();
+    cloud.setStage('supercell');
 
     // Rainshaft volume
     this.game.weather.createRainshaft(pos, size * 0.7, 180, type === 'hp' ? 900 : (type === 'lp' ? 250 : 500));

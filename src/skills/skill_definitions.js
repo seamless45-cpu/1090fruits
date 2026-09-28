@@ -1330,8 +1330,25 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Spawns giant squall line cloud behind player moving forward (10m/s, wind 120mph, rain 200mm/h). Powerful gust fronts shake camera.',
         cast: (ctx) => {
-          ctx.cameraController.addShake(ctx.player.position, 2.5, 2.0);
-          ctx.weather.createRainshaft(ctx.player.position, 180, 150, 600);
+          // ONE-PIECE CINEMATIC: a full squall line - a wall of storm cells
+          // rolling from behind the player, trailing its rain curtain.
+          const cam = ctx.cameraController.camera;
+          const dir = new THREE.Vector3();
+          cam.getWorldDirection(dir);
+          dir.y = 0;
+          if (dir.lengthSq() < 0.001) dir.set(0, 0, 1);
+          dir.normalize();
+          const origin = ctx.player.position.clone().addScaledVector(dir, -130);
+          ctx.weather.spawnSquallLine(origin, dir, 5, 14, 110);
+          // Gust front reaches the player as the line passes
+          setTimeout(() => {
+            ctx.cameraController.addShake(ctx.player.position, 3.2, 2.5);
+            ctx.sound.playGust(1.0);
+          }, 900);
+          setTimeout(() => {
+            ctx.cameraController.addShake(ctx.player.position, 2.0, 2.0);
+            ctx.sound.playGust(0.6);
+          }, 1700);
         }
       },
       {
@@ -1342,10 +1359,19 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Spawns 4 large cumulonimbus clouds dumping golf-ball hailstones (50% shatter for 30% damage). Lasts 8 seconds.',
         cast: (ctx) => {
+          // 4 towering cells, each dumping a live hail field (shatter
+          // damage handled by the HailField physics on ground impact)
           for (let i = 0; i < 4; i++) {
-            const pos = ctx.player.position.clone().add(new THREE.Vector3((Math.random() - 0.5) * 80, 0, (Math.random() - 0.5) * 80));
-            ctx.weather.createRainshaft(pos, 100, 130, 400);
+            const pos = ctx.player.position.clone().add(new THREE.Vector3(
+              (Math.random() - 0.5) * 120, 0, (Math.random() - 0.5) * 120));
+            ctx.weather.spawnGrowingCloud(pos, true, 120, {
+              startStage: 'cumulonimbus', maxStage: 'cumulonimbus',
+              growthDuration: 2.0, lifeDuration: 14, particles: 900,
+              rainOnSpawn: true,
+            });
+            ctx.weather.spawnHailstorm(pos, 95, 12);
           }
+          ctx.cameraController.addShake(ctx.player.position, 1.2, 1.5);
         }
       },
       {
@@ -1356,11 +1382,22 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Spawns 4 derecho storm walls from all 4 sides moving towards player at 24m/s (wind 240mph, 800m x 1600m). Passes through for 30s.',
         cast: (ctx) => {
-          ctx.cameraController.addShake(ctx.player.position, 3.0, 3.5);
+          // ONE-PIECE CINEMATIC: 4 derecho walls closing on the arena from
+          // all sides; each whooshes a gust front past the player as it hits.
+          const p = ctx.player.position;
+          ctx.cameraController.addShake(p, 3.0, 3.5);
+          ctx.sound.playGust(1.1);
           for (let i = 0; i < 4; i++) {
-            const angle = (i / 4) * Math.PI * 2;
-            const pos = ctx.player.position.clone().add(new THREE.Vector3(Math.cos(angle) * 120, 0, Math.sin(angle) * 120));
-            ctx.weather.createRainshaft(pos, 120, 150, 500);
+            const angle = (i / 4) * Math.PI * 2 + Math.PI / 4;
+            const from = p.clone().add(new THREE.Vector3(
+              Math.cos(angle) * 300, 0, Math.sin(angle) * 300));
+            const dir = p.clone().sub(from).setY(0).normalize();
+            ctx.weather.spawnSquallLine(from, dir, 4, 24, 100);
+            const passDelay = (300 / 24) * 1000 + i * 120;
+            setTimeout(() => {
+              ctx.cameraController.addShake(ctx.player.position, 3.5, 2.5);
+              ctx.sound.playGust(1.0);
+            }, passDelay);
           }
         }
       },
@@ -1372,9 +1409,18 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Big supercell cloud swirls underbase to produce a 200 mph tornado that sucks enemies in and damages continuously for 10s.',
         cast: (ctx) => {
-          ctx.weather.createTornado(ctx.player.aimTarget, 8, 160, 200, 10.0);
-          // ONE-PIECE CINEMATIC: visible swirling suction vortex
-          ctx.explosions.vortex(ctx.player.aimTarget, 0x99ccff, 14.0, 9.5);
+          const target = ctx.player.aimTarget;
+          // ONE-PIECE CINEMATIC: rotating wall cloud under a supercell,
+          // with the condensation funnel dropped below it.
+          ctx.weather.spawnWallCloud(target, 55, 12, 0.55);
+          ctx.weather.spawnGrowingCloud(target, true, 170, {
+            startStage: 'cumulonimbus', maxStage: 'supercell',
+            growthDuration: 3.0, lifeDuration: 14,
+          });
+          ctx.weather.createTornado(target, 8, 160, 200, 10.0);
+          // visible swirling suction vortex at the ground
+          ctx.explosions.vortex(target, 0x99ccff, 14.0, 9.5);
+          ctx.cameraController.addShake(target, 2.5, 2.0);
         }
       },
       {
@@ -1389,12 +1435,14 @@ export const SKILL_DATABASE = {
           ctx.player.buffs.invincible.timer = 1.0;
 
           setTimeout(() => {
+            const eye = ctx.player.position.clone();
+            // ONE-PIECE CINEMATIC: a full hurricane disc - a ring of orbiting
+            // eyewall supercells around a calm eye + eyewall rain ring.
+            ctx.weather.spawnHurricane(eye, 95, 16);
             ctx.cameraController.addShake(ctx.player.position, 5.0, 5.0);
-            ctx.weather.createRainshaft(ctx.player.position, 280, 220, 800);
-            ctx.weather.createTornado(ctx.player.position.clone().add(new THREE.Vector3(30, 0, 30)), 12, 180, 350, 15.0);
-            // ONE-PIECE CINEMATIC: colossal eyewall suction vortex
-            ctx.explosions.vortex(ctx.player.position.clone().add(new THREE.Vector3(30, 0, 30)), 0x88bbee, 30.0, 14.0);
-            ctx.explosions.megaShockwave(ctx.player.position, 150.0, 0x66aaff);
+            // colossal eyewall suction vortex at the eye
+            ctx.explosions.vortex(eye, 0x88bbee, 30.0, 14.0);
+            ctx.explosions.megaShockwave(eye, 150.0, 0x66aaff);
           }, 1000);
         }
       },
@@ -1406,8 +1454,14 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Continuous microburst slamming down at 200 m/s for 10s. Rain wall expands rapidly knocking enemies away with intense wind camera shake.',
         cast: (ctx) => {
-          ctx.cameraController.addShake(ctx.player.aimTarget, 4.0, 2.5);
-          ctx.weather.createMicroburst(ctx.player.aimTarget, 150, 10.0);
+          // Staggered triple-downdraft triangle + expanding rain curtain
+          const t = ctx.player.aimTarget;
+          ctx.cameraController.addShake(t, 4.0, 2.5);
+          ctx.weather.createMicroburst(t, 150, 10.0);
+          const mk = (x, z) => new THREE.Vector3(t.x + x, 0, t.z + z);
+          setTimeout(() => ctx.weather.createMicroburst(mk(70, 40), 120, 8.0), 400);
+          setTimeout(() => ctx.weather.createMicroburst(mk(-70, 40), 120, 8.0), 800);
+          ctx.weather.createRainshaft(t, 220, 160, 600);
         }
       },
       {
@@ -1418,8 +1472,21 @@ export const SKILL_DATABASE = {
         baseCd: 5.0,
         desc: 'Large nimbostratus clouds producing steady rain. Rainwater rises on the ground, drowning enemies.',
         cast: (ctx) => {
+          // Low, wide, flat nimbostratus deck over the arena + rising flood
           ctx.weather.startNimbostratusFlood(20.0);
-          ctx.weather.createRainshaft(ctx.player.position, 250, 140, 500);
+          const p = ctx.player.position;
+          for (let i = 0; i < 5; i++) {
+            const a = (i / 5) * Math.PI * 2;
+            const r = 50 + i * 30;
+            const off = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
+            ctx.weather.spawnGrowingCloud(p.clone().add(off), false, 140, {
+              altitude: 62, flat: 0.40,
+              startStage: 'congestus', maxStage: 'congestus',
+              growthDuration: 2.0, lifeDuration: 22, particles: 900,
+              rainOnSpawn: i < 3,
+            });
+          }
+          ctx.weather.createRainshaft(p, 260, 120, 700);
         }
       },
       {
@@ -1453,7 +1520,9 @@ export const SKILL_DATABASE = {
               0,
               (Math.random() - 0.5) * 160
             ));
-            ctx.weather.spawnGrowingCloud(p, false, 100);
+            ctx.weather.spawnGrowingCloud(p, false, 100, {
+              growthDuration: 4.0, lifeDuration: 32, particles: 750,
+            });
           }, 800);
         }
       }

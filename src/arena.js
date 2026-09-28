@@ -286,6 +286,26 @@ export class Arena {
     this.skyMat.uniforms.uFlash.value = Math.min(1.5, level);
   }
 
+  /**
+   * Round 7: live storm lighting. level 0..1 (driven by the weather
+   * manager): a heavy sky over the arena dims the key/hemisphere lights
+   * and thickens the fog, so storms visibly weigh down the whole world.
+   */
+  setStormLevel(level) {
+    // Weather manager ticks at 2Hz - ease toward it per frame so the sky
+    // darkens/rises smoothly instead of stepping.
+    const target = level < 0 ? 0 : level > 1 ? 1 : level;
+    this._stormLvl = this._stormLvl == null ? target : this._stormLvl + (target - this._stormLvl) * 0.04;
+    const l = this._stormLvl;
+    this.hemi.intensity = 0.85 * (1 - 0.52 * l);
+    this.dirLight.intensity = 2.2 * (1 - 0.58 * l);
+    const fog = this.scene.fog;
+    if (fog && fog.densityBase !== undefined) {
+      fog.color.setHex(0x0a1420).lerp(fog.colorStorm, l);
+      fog.density = fog.densityBase * (1 + 0.7 * l);
+    }
+  }
+
   createFloor() {
     // Polished obsidian platform with glowing neon grid
     const tex = makeFloorTexture(2048);
@@ -537,8 +557,10 @@ export class Arena {
     this.dirLight = new THREE.DirectionalLight(0xbfd8ff, 2.2);
     this.dirLight.position.set(140, 260, -180);
     this.dirLight.castShadow = true;
-    this.dirLight.shadow.mapSize.width = 2048;
-    this.dirLight.shadow.mapSize.height = 2048;
+    // Round 7: 1024 default (the adaptive governor owns further scaling)
+    this.dirLight.shadow.mapSize.width = 1024;
+    this.dirLight.shadow.mapSize.height = 1024;
+    this.userShadowSize = 1024;
     this.dirLight.shadow.camera.near = 20;
     this.dirLight.shadow.camera.far = 900;
     this.dirLight.shadow.camera.left = -180;
@@ -562,9 +584,11 @@ export class Arena {
   setShadowQuality(quality) {
     if (quality === 'off') {
       this.dirLight.castShadow = false;
+      this.userShadowSize = 0;
     } else {
       this.dirLight.castShadow = true;
       const size = quality === 'ultra' ? 4096 : (quality === 'high' ? 2048 : 1024);
+      this.userShadowSize = size;
       this.dirLight.shadow.mapSize.width = size;
       this.dirLight.shadow.mapSize.height = size;
       if (this.dirLight.shadow.map) {

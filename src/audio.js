@@ -32,6 +32,12 @@ class SoundSystem {
     this.masterGain.gain.setValueAtTime(0.5, this.ctx.currentTime);
     this.masterGain.connect(this.ctx.destination);
     this.startAmbientWind();
+    // Pre-method: pre-synthesize the shared noise buffers used by the
+    // storm audio engine (no per-thunder buffer allocation).
+    this._getNoiseBuffer(1);
+    this._getNoiseBuffer(2);
+    this._getNoiseBuffer(4);
+    if (this._stormLevelPending != null) this.setStormAmbience(this._stormLevelPending);
   }
 
   /**
@@ -103,49 +109,212 @@ class SoundSystem {
   // --- Sound Effects Generators ---
 
   // 1. High-frequency Lightning Crack & Thunder
+  /** Close-range strike (lightning-beast skill). Real close thunder: a violent
+   *  broadband crack, then 2-3 overlapping booming rumble hits, then sub-bass. */
   playLightning(volume = 1.0, pitch = 1.0) {
-    if (!this.ctx || this.isMuted) return;
-    const now = this.ctx.currentTime;
+    this.playThunder(0.08 / (pitch * pitch), 0, volume);
+  }
 
-    // Sharp white noise zap
-    const bufferSize = this.ctx.sampleRate * 0.4;
-    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const output = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
+  // =================================================================
+  // STORM AUDIO ENGINE (round 7)
+  // Realistic procedural thunder + persistent storm ambience beds.
+  // All noise buffers are pre-generated once (pre-method: zero per-call
+  // buffer synthesis). Thunder is scheduled with the physical sound-
+  // travel delay so light and thunder never arrive simultaneously.
+  // =================================================================
+  _getNoiseBuffer(seconds) {
+    if (!this._noiseBufs) this._noiseBufs = {};
+    const key = seconds;
+    if (this._noiseBufs[key]) return this._noiseBufs[key];
+    const ctx = this.ctx;
+    const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this._noiseBufs[key] = buf;
+    return buf;
+  }
+
+  /**
+   * Realistic thunder.
+   * distance01: 0 = strike on top of the player, 1 = far off-strike.
+   *   - light is instant, sound travels at ~343 m/s => the whole event is
+   *     scheduled `d * ~2.5s` later (the "count the seconds" effect)
+   *   - close strikes open with a sharp broadband CRACK, then booms
+   *   - distant strikes are muffled, no crack, just rolling rumble
+   *   - the rumble itself is a chain of 2-4 staggered lowpassed noise
+   *     hits with random gaps -> the classic "chug-chug-chug" roll
+   *   - a 50->28Hz sine sub adds the physical chest pressure
+   * pan: -1..1 relative to the player (left/right of the strike).
+   */
+  playThunder(distance01 = 0.5, pan = 0, volumeBoost = 1.0) {
+    if (!this.ctx || this.isMuted) return;
+    const ctx = this.ctx;
+    const d = distance01 < 0 ? 0 : distance01 > 1 ? 1 : distance01;
+    const delay = d * 2.5;
+    const t0 = ctx.currentTime + delay;
+    const volume = 0.85 * (1 - d * 0.72) * volumeBoost;
+    if (volume <= 0.01) return;
+
+    const out = ctx.createGain();
+    if (ctx.createStereoPanner) {
+      const panner = ctx.createStereoPanner();
+      panner.pan.value = Math.max(-0.85, Math.min(0.85, pan));
+      out.connect(panner);
+      panner.connect(this.masterGain);
+    } else {
+      out.connect(this.masterGain);
     }
 
-    const whiteNoise = this.ctx.createBufferSource();
-    whiteNoise.buffer = buffer;
+    // 1) Crack - close strikes only. Bandpass-swept noise burst, 1.6k->300Hz.
+    if (d < 0.3) {
+      const crack = ctx.createBufferSource();
+      crack.buffer = this._getNoiseBuffer(1);
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = 0.9;
+      bp.frequency.setValueAtTime(1700, t0);
+      bp.frequency.exponentialRampToValueAtTime(280, t0 + 0.12);
+      const cg = ctx.createGain();
+      cg.gain.setValueAtTime(0.0001, t0);
+      cg.gain.exponentialRampToValueAtTime(0.9 * (1 - d / 0.3) * volumeBoost, t0 + 0.012);
+      cg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+      crack.connect(bp); bp.connect(cg); cg.connect(out);
+      crack.start(t0); crack.stop(t0 + 0.3);
+    }
 
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'highpass';
-    filter.frequency.setValueAtTime(800 * pitch, now);
-    filter.frequency.exponentialRampToValueAtTime(100, now + 0.35);
+    // 2) Rolling rumble - 2-4 staggered lowpassed noise hits, random offsets.
+    const hits = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < hits; i++) {
+      const start = t0 + 0.05 + i * (0.35 + Math.random() * 0.95);
+      const dur = 1.8 + Math.random() * (3.2 - d);
+      const src = ctx.createBufferSource();
+      src.buffer = this._getNoiseBuffer(4);
+      src.playbackRate.value = 0.75 + Math.random() * 0.5;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.Q.value = 0.55;
+      const f0 = 420 * (1 - d) + 90 * d;  // far = more muffled
+      lp.frequency.setValueAtTime(f0 * 1.7, start);
+      lp.frequency.exponentialRampToValueAtTime(Math.max(45, f0 * 0.55), start + dur);
+      const g = ctx.createGain();
+      const hitVol = volume * (i === 0 ? 1 : 0.5 + Math.random() * 0.35);
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(hitVol, start + 0.05 + Math.random() * 0.25);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      src.connect(lp); lp.connect(g); g.connect(out);
+      src.start(start, Math.random() * 1.5, dur + 0.5);
+    }
 
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.7 * volume, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+    // 3) Sub-bass pressure pulse, 52->28Hz sine.
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(52 * (1 - d * 0.5), t0 + 0.08);
+    sub.frequency.exponentialRampToValueAtTime(27, t0 + 2.3);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.0001, t0 + 0.08);
+    sg.gain.exponentialRampToValueAtTime(volume * 0.5, t0 + 0.32);
+    sg.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.7);
+    sub.connect(sg); sg.connect(out);
+    sub.start(t0 + 0.08); sub.stop(t0 + 2.9);
+  }
 
-    whiteNoise.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.masterGain);
-    whiteNoise.start(now);
+  /** Gust-front whoosh (squall line / derecho passing over the player). */
+  playGust(intensity = 1.0) {
+    if (!this.ctx || this.isMuted) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this._getNoiseBuffer(2);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.1;
+    bp.frequency.setValueAtTime(170, now);
+    bp.frequency.exponentialRampToValueAtTime(950, now + 0.45);
+    bp.frequency.exponentialRampToValueAtTime(120, now + 1.8);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.42 * Math.max(0.2, intensity), now + 0.35);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 1.9);
+    src.connect(bp); bp.connect(g); g.connect(this.masterGain);
+    src.start(now); src.stop(now + 2.0);
+  }
 
-    // Deep thunder rumble sub-bass
-    const sub = this.ctx.createOscillator();
-    const subGain = this.ctx.createGain();
-    sub.type = 'sawtooth';
-    sub.frequency.setValueAtTime(90 * pitch, now);
-    sub.frequency.exponentialRampToValueAtTime(25, now + 0.5);
+  /** Hail hitting ground / armor - short bright chatter. */
+  playHail(intensity = 1.0) {
+    if (!this.ctx || this.isMuted) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this._getNoiseBuffer(1);
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 2600;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.14 * Math.max(0.2, Math.min(1.4, intensity)), now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    src.connect(hp); hp.connect(g); g.connect(this.masterGain);
+    src.start(now); src.stop(now + 0.18);
+  }
 
-    subGain.gain.setValueAtTime(0.6 * volume, now);
-    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+  /**
+   * Persistent storm ambience (created ONCE, intensity smoothed live).
+   * level 0..1: wind howl (bandpass noise + slow LFO), rain hiss
+   * (highpass noise, ~level^2 so it only reads when heavy), and a
+   * modulated distant-rumble bed. Driven by the weather manager at ~2Hz.
+   */
+  setStormAmbience(level) {
+    const lv = level < 0 ? 0 : level > 1 ? 1 : level;
+    if (!this.ctx) { this._stormLevelPending = lv; return; }
+    this._buildStormBeds();
+    const t = this.ctx.currentTime;
+    this._windGain.gain.setTargetAtTime(0.05 + lv * 0.30, t, 0.9);
+    this._rainGain.gain.setTargetAtTime(lv * lv * 0.30, t, 0.7);
+    this._rumbleBedGain.gain.setTargetAtTime(0.02 + lv * 0.17, t, 1.4);
+    this._rumbleLfoDepth.gain.setTargetAtTime(0.015 + lv * 0.05, t, 1.0);
+  }
 
-    sub.connect(subGain);
-    subGain.connect(this.masterGain);
-    sub.start(now);
-    sub.stop(now + 0.65);
+  _buildStormBeds() {
+    if (this._bedsBuilt) return;
+    this._bedsBuilt = true;
+    const ctx = this.ctx;
+    const white = this._getNoiseBuffer(4);
+
+    // Wind howl: bandpass noise, slow LFO sweeps the center frequency
+    const windSrc = ctx.createBufferSource();
+    windSrc.buffer = white; windSrc.loop = true;
+    const windBp = ctx.createBiquadFilter();
+    windBp.type = 'bandpass'; windBp.frequency.value = 430; windBp.Q.value = 0.6;
+    const windLfo = ctx.createOscillator(); windLfo.frequency.value = 0.07;
+    const windLfoDepth = ctx.createGain(); windLfoDepth.gain.value = 230;
+    windLfo.connect(windLfoDepth); windLfoDepth.connect(windBp.frequency);
+    this._windGain = ctx.createGain(); this._windGain.gain.value = 0;
+    windSrc.connect(windBp); windBp.connect(this._windGain);
+    this._windGain.connect(this.masterGain);
+    windSrc.start(); windLfo.start();
+
+    // Rain: highpassed noise hiss
+    const rainSrc = ctx.createBufferSource();
+    rainSrc.buffer = white; rainSrc.loop = true; rainSrc.playbackRate.value = 1.35;
+    const rainHp = ctx.createBiquadFilter();
+    rainHp.type = 'highpass'; rainHp.frequency.value = 3100;
+    const rainLp = ctx.createBiquadFilter();
+    rainLp.type = 'lowpass'; rainLp.frequency.value = 12500;
+    this._rainGain = ctx.createGain(); this._rainGain.gain.value = 0;
+    rainSrc.connect(rainHp); rainHp.connect(rainLp);
+    rainLp.connect(this._rainGain); this._rainGain.connect(this.masterGain);
+    rainSrc.start();
+
+    // Distant rumble bed: lowpassed noise + slow LFO on the gain
+    const rumbleSrc = ctx.createBufferSource();
+    rumbleSrc.buffer = white; rumbleSrc.loop = true; rumbleSrc.playbackRate.value = 0.5;
+    const rumbleLp = ctx.createBiquadFilter();
+    rumbleLp.type = 'lowpass'; rumbleLp.frequency.value = 105;
+    this._rumbleBedGain = ctx.createGain(); this._rumbleBedGain.gain.value = 0;
+    const rumbleLfo = ctx.createOscillator(); rumbleLfo.frequency.value = 0.13;
+    this._rumbleLfoDepth = ctx.createGain(); this._rumbleLfoDepth.gain.value = 0;
+    rumbleLfo.connect(this._rumbleLfoDepth);
+    this._rumbleLfoDepth.connect(this._rumbleBedGain.gain);
+    rumbleSrc.connect(rumbleLp); rumbleLp.connect(this._rumbleBedGain);
+    this._rumbleBedGain.connect(this.masterGain);
+    rumbleSrc.start(); rumbleLfo.start();
   }
 
   // 2. Heavy Sci-Fi Explosion (Asteroids, Bombs)

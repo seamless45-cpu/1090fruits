@@ -38,6 +38,9 @@ export class GameEngine {
     // 1. Three.js Scene, Camera, Renderer
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0x0a1420, 0.0016);
+    // Round 7: storm lighting extension (arena.setStormLevel lerps to these)
+    this.scene.fog.densityBase = 0.0016;
+    this.scene.fog.colorStorm = new THREE.Color(0x151b28);
 
     const aspect = window.innerWidth / window.innerHeight;
     this.camera = new THREE.PerspectiveCamera(58, aspect, 0.2, 1200);
@@ -82,7 +85,8 @@ export class GameEngine {
     // 3. Effects Managers
     this.lightning = new LightningManager(this.scene);
     this.explosions = new ExplosionManager(this.scene, this.cameraController, this.sound);
-    this.weather = new CloudWeatherManager(this.scene, this.lightning, this.explosions);
+    // Round 7: sound system feeds distance-delayed thunder + storm ambience
+    this.weather = new CloudWeatherManager(this.scene, this.lightning, this.explosions, this.sound);
 
     // 4. Arena & World (renderer passed in for PMREM environment reflections)
     this.arena = new Arena(this.scene, this.renderer);
@@ -415,6 +419,17 @@ export class GameEngine {
           if (this.explosions && this.explosions.preflight) {
             const n = this.explosions.preflight(this.renderer, this.camera);
             return ` ${n} EFFECTS`;
+          }
+        },
+      },
+      {
+        label: 'VOLUMETRIC CLOUD ENGINE // GPU COMPILE',
+        work: () => {
+          // Pre-compile the GPU soft-particle cloud shader so the first
+          // storm cell never hitches on a shader compile.
+          if (this.weather && this.weather.preflight) {
+            const n = this.weather.preflight(this.renderer, this.camera);
+            return ` CLOUD PROGRAMS`;
           }
         },
       },
@@ -891,6 +906,66 @@ export class GameEngine {
     if (el.textContent !== label) el.textContent = label;
   }
 
+  // =================================================================
+  // ADAPTIVE QUALITY GOVERNOR (Round 7)
+  // "Performance issues still persist" => a runtime governor that steps
+  // render cost up and down to hold frame time. It watches the render
+  // stage of each frame (EMA-smoothed) and, on a slow 1.2s cadence,
+  // moves through quality tiers:
+  //     T0  full      : max pixel ratio, 1024 shadow, bloom on
+  //     T1  high      : pixel ratio * 0.8
+  //     T2  medium    : pixel ratio * 0.62, 512 shadow
+  //     T3  low       : pixel ratio * 0.5,  512 shadow, bloom off
+  // It eases back up when headroom returns, so a good GPU stays at T0.
+  // =================================================================
+  _qgApply(tier) {
+    if (tier === this._qgTier) return;
+    this._qgTier = tier;
+    const basePR = Math.min(window.devicePixelRatio, 2.0);
+    const prFactor = [1.0, 0.8, 0.62, 0.5][tier];
+    const pr = Math.max(0.75, basePR * prFactor);
+    this.renderer.setPixelRatio(pr);
+    this.composer.setPixelRatio(pr);
+    // Match the window-resize handler exactly
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.composer.setSize(window.innerWidth, window.innerHeight);
+
+    // Shadows: never touch them at the top two tiers (the user's explicit
+    // settings-modal choice stands); under load, clamp to 512. Respect OFF.
+    const userShadow = this.arena.userShadowSize || 1024;
+    const shadowSize = this.arena.dirLight.castShadow
+      ? Math.min(userShadow, tier >= 2 ? 512 : userShadow)
+      : 0;
+    const dl = this.arena.dirLight;
+    if (dl && dl.shadow && shadowSize > 0) {
+      if (dl.shadow.mapSize.x !== shadowSize) {
+        dl.shadow.mapSize.set(shadowSize, shadowSize);
+        if (dl.shadow.map) { dl.shadow.map.dispose(); dl.shadow.map = null; }
+      }
+    }
+    // Bloom is the priciest pass; kill it only on the lowest tier - and
+    // only the governor may switch it back on (the user's toggle stands).
+    if (tier >= 3 && this.bloomPass.enabled) {
+      this._qgBloomWasOn = true;
+      this.bloomPass.enabled = false;
+    } else if (tier < 3 && this._qgBloomWasOn) {
+      this._qgBloomWasOn = false;
+      this.bloomPass.enabled = true;
+    }
+    this._qgLog = `T${tier} · ${pr.toFixed(2)}x · shadow ${shadowSize} · bloom ${this.bloomPass.enabled ? 'on' : 'off'}`;
+  }
+
+  _qgUpdate(renderMs, dt) {
+    if (!this._qgTier) this._qgTier = 0;
+    // Exponential moving average of render time
+    this._qgEma = this._qgEma != null ? this._qgEma * 0.9 + renderMs * 0.1 : renderMs;
+    this._qgTimer = (this._qgTimer || 0) + dt;
+    if (this._qgTimer < 1.2) return;
+    this._qgTimer = 0;
+    if (this._qgEma > 22 && this._qgTier < 3) this._qgApply(this._qgTier + 1);
+    else if (this._qgEma < 12 && this._qgTier > 0) this._qgApply(this._qgTier - 1);
+  }
+
   animate() {
     requestAnimationFrame(this.animate);
 
@@ -933,6 +1008,9 @@ export class GameEngine {
     this.lightning.update(dt);
     this.explosions.update(dt);
     this.weather.update(dt, this.enemies.enemies, this.player.position);
+
+    // 5a. Round 7: storms visibly dim the sky + thicken fog (smoothed in weather)
+    this.arena.setStormLevel(this.weather.getStormLevel());
 
     // 5b. Animated environment (sky, core, pylons, dust, rings)
     this.arena.update(dt, this.camera);
@@ -1005,6 +1083,9 @@ export class GameEngine {
 
     const renderMs = performance.now() - startTime;
 
+    // Round 7: adaptive quality governor keeps frame time in budget
+    this._qgUpdate(renderMs, dt);
+
     // Telemetry & FPS Stats
     this.frameCount++;
     this.fpsTimer += dt;
@@ -1015,7 +1096,8 @@ export class GameEngine {
 
       const debrisCount = this.explosions.getActiveDebrisCount();
       const lightningCount = this.lightning.getActiveCount();
-      this.settingsModal.updateStats(this.currentFps, renderMs, debrisCount, debrisCount * 2, lightningCount);
+      this.settingsModal.updateStats(this.currentFps, renderMs, debrisCount, debrisCount * 2, lightningCount,
+        this._qgTier > 0 ? ` · Q-${this._qgTier}` : '');
     }
   }
 }

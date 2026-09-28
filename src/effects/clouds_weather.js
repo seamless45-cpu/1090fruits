@@ -221,8 +221,10 @@ const _v3b = new THREE.Vector3();
 // =====================================================================
 // RAINSHAFT - streak lines + curtain sheets + splash rings + mist
 // =====================================================================
+const MIST_PER_SHAFT = 5;
+
 class RainShaft {
-  constructor(manager, centerPos, width, height, particleCount) {
+  constructor(manager, centerPos, width, height, particleCount, opts = null) {
     const tex = manager.tex;
     const count = particleCount;
     this.scene = manager.scene;
@@ -231,7 +233,11 @@ class RainShaft {
     this.height = height;
     this.count = count;
     this.elapsed = 0;
-    this.duration = 12.0;
+    this.duration = opts && opts.duration != null ? opts.duration : 12.0;
+    // Round 7: optional movement so rain can trail a moving squall cell
+    // or follow a hurricane eyewall orbit.
+    this.vel = opts && opts.vel ? opts.vel.clone() : null;
+    this.orbit = opts && opts.orbit ? opts.orbit : null;
     this.windX = (Math.random() - 0.5) * 9;
     this.windZ = (Math.random() - 0.5) * 9;
 
@@ -283,31 +289,61 @@ class RainShaft {
       depthWrite: false,
       fog: false,
     });
+    // Round 7: merge the 5 curtain sheets into ONE mesh (was 5 draw calls
+    // per shaft). Each sheet is a Y-rotated quad; corners baked once.
     const sheetGeo = new THREE.PlaneGeometry(sheetW, sheetH);
-    for (let i = 0; i < 5; i++) {
-      const sheet = new THREE.Mesh(sheetGeo, this.curtainMat);
-      sheet.position.y = -height * 0.02;
-      sheet.rotation.y = (i / 5) * Math.PI;
-      this.curtainGroup.add(sheet);
+    const base = sheetGeo.attributes.position.array; // 4 corners of the XY quad
+    const merged = new THREE.BufferGeometry();
+    const SHEETS = 5;
+    const mPos = new Float32Array(SHEETS * base.length);
+    const mUv = new Float32Array(SHEETS * 8);
+    const mIdx = [];
+    const uv0 = sheetGeo.attributes.uv.array;
+    const m4 = new THREE.Matrix4();
+    const yOff = -height * 0.02;
+    for (let i = 0; i < SHEETS; i++) {
+      const theta = (i / SHEETS) * Math.PI;
+      m4.makeRotationY(theta);
+      const v = new THREE.Vector3();
+      for (let c = 0; c < 4; c++) {
+        v.set(base[c * 3], base[c * 3 + 1] + yOff, base[c * 3 + 2]).applyMatrix4(m4);
+        mPos[i * base.length + c * 3 + 0] = v.x;
+        mPos[i * base.length + c * 3 + 1] = v.y;
+        mPos[i * base.length + c * 3 + 2] = v.z;
+      }
+      mUv.set(uv0, i * 8);
+      const o = i * 4;
+      mIdx.push(o, o + 1, o + 2, o, o + 2, o + 3);
     }
+    merged.setAttribute('position', new THREE.BufferAttribute(mPos, 3));
+    merged.setAttribute('uv', new THREE.BufferAttribute(mUv, 2));
+    merged.setIndex(mIdx);
+    this.curtainMesh = new THREE.Mesh(merged, this.curtainMat);
+    this.curtainGroup.add(this.curtainMesh);
+    sheetGeo.dispose();
     this.scene.add(this.curtainGroup);
 
-    // Ground mist puffs
-    this.mist = [];
-    for (let i = 0; i < 5; i++) {
-      const m = new THREE.SpriteMaterial({
-        map: tex.puff, color: 0xbcd2e8, transparent: true, opacity: 0.14,
-        depthWrite: false, fog: false,
-      });
-      const sp = new THREE.Sprite(m);
-      const a = (i / 5) * Math.PI * 2 + Math.random();
+    // Ground mist (Round 7: ONE Points draw call, was 5 sprite draw calls)
+    const MIST = MIST_PER_SHAFT;
+    this.mistPos = new Float32Array(MIST * 3);
+    this.mistPhase = new Float32Array(MIST);
+    for (let i = 0; i < MIST; i++) {
+      const a = (i / MIST) * Math.PI * 2 + Math.random();
       const r = Math.random() * width * 0.4;
-      sp.position.set(centerPos.x + Math.cos(a) * r, 2.5 + Math.random() * 3, centerPos.z + Math.sin(a) * r);
-      const s = width * (0.25 + Math.random() * 0.2);
-      sp.scale.set(s, s * 0.45, 1);
-      this.scene.add(sp);
-      this.mist.push(sp);
+      this.mistPos[i * 3] = centerPos.x + Math.cos(a) * r;
+      this.mistPos[i * 3 + 1] = 2.5 + Math.random() * 3;
+      this.mistPos[i * 3 + 2] = centerPos.z + Math.sin(a) * r;
+      this.mistPhase[i] = Math.random() * 10;
     }
+    this.mistGeo = new THREE.BufferGeometry();
+    this.mistGeo.setAttribute('position', new THREE.BufferAttribute(this.mistPos, 3));
+    this.mistMat = new THREE.PointsMaterial({
+      map: tex.puff, color: 0xbcd2e8, transparent: true, opacity: 0.14,
+      depthWrite: false, size: width * 0.4, sizeAttenuation: true, fog: false,
+    });
+    this.mist = new THREE.Points(this.mistGeo, this.mistMat);
+    this.mist.frustumCulled = false;
+    this.scene.add(this.mist);
 
     // Shared splash ring pool (from manager)
     this.splashPool = manager.splashPool;
@@ -331,6 +367,35 @@ class RainShaft {
     this.curtainMat.opacity = 0.1 * env;
     this.curtainTex.offset.y -= dt * 1.6; // rain scrolling down the sheets
     this.curtainGroup.rotation.y += dt * 0.15;
+
+    // Round 7: translate the whole shaft (drops + curtain + mist) when it
+    // follows a moving squall cell or an eyewall orbit.
+    let dx = 0, dz = 0;
+    if (this.orbit) {
+      const o = this.orbit;
+      const nx = o.center.x + Math.cos(o.angle) * o.radius;
+      const nz = o.center.z + Math.sin(o.angle) * o.radius;
+      dx = nx - this.center.x;
+      dz = nz - this.center.z;
+      this.center.x = nx; this.center.z = nz;
+    } else if (this.vel) {
+      dx = this.vel.x * dt;
+      dz = this.vel.z * dt;
+      this.center.x += dx;
+      this.center.z += dz;
+    }
+    if (dx !== 0 || dz !== 0) {
+      const pos = this.positions;
+      for (let i = 0; i < this.count; i++) {
+        const i6 = i * 6;
+        pos[i6] += dx; pos[i6 + 2] += dz;
+        pos[i6 + 3] += dx; pos[i6 + 5] += dz;
+      }
+      this.curtainGroup.position.x += dx;
+      this.curtainGroup.position.z += dz;
+      this.mist.position.x += dx;
+      this.mist.position.z += dz;
+    }
 
     const pos = this.positions;
     const streak = 0.03; // seconds of velocity visualized as streak length
@@ -357,12 +422,15 @@ class RainShaft {
     }
     this.lines.geometry.attributes.position.needsUpdate = true;
 
-    // Mist drift + fade
-    for (let m = 0; m < this.mist.length; m++) {
-      const sp = this.mist[m];
-      sp.position.x += Math.sin(this.elapsed * 0.4 + m * 2) * dt * 2;
-      sp.position.z += Math.cos(this.elapsed * 0.3 + m * 1.7) * dt * 1.5;
-      sp.material.opacity = 0.14 * env;
+    // Mist drift + fade (single Points buffer, in-place)
+    {
+      const mp = this.mistPos;
+      for (let m = 0; m < MIST_PER_SHAFT; m++) {
+        mp[m * 3] += Math.sin(this.elapsed * 0.4 + m * 2) * dt * 2;
+        mp[m * 3 + 2] += Math.cos(this.elapsed * 0.3 + m * 1.7) * dt * 1.5;
+      }
+      this.mistGeo.attributes.position.needsUpdate = true;
+      this.mistMat.opacity = 0.14 * env;
     }
   }
 
@@ -373,10 +441,10 @@ class RainShaft {
     this.curtainMat.dispose();
     this.curtainTex.dispose();
     this.lines.geometry.dispose();
-    for (const sp of this.mist) {
-      this.scene.remove(sp);
-      sp.material.dispose();
-    }
+    if (this.curtainMesh) this.curtainMesh.geometry.dispose();
+    this.scene.remove(this.mist);
+    this.mistGeo.dispose();
+    this.mistMat.dispose();
   }
 }
 
@@ -720,104 +788,323 @@ const CLOUD_STAGES = {
   cumulonimbus:  { light: 0xcdd8e4, dark: 0x55606f },
   supercell:     { light: 0x8f88ad, dark: 0x3a3352 },
 };
-const MAX_ACTIVE_CLOUDS = 7;
+const MAX_ACTIVE_CLOUDS = 12; // one GPU draw call each (round 7)
 
+// =====================================================================
+// GPU VOLUMETRIC CLOUD (Round 7)
+//
+// Replaces the 32-sprite billboard cloud (32+ draw calls, flat camera-
+// facing puffs, per-puff CPU drift) with ONE THREE.Points draw call per
+// cloud. Every puff's motion is computed in the VERTEX SHADER from uTime:
+//   - differential orbital circulation (top + core rotate faster => the
+//     mesocyclone is visible as actual rotation, not a static ring)
+//   - churning living edges (two incommensurate sine waves per puff)
+//   - stage-driven tower growth + anvil top spread
+//   - sunlit-from-above shading (bright tops, churning dark base)
+//   - in-cloud lightning: puffs near the flash height ignite from inside
+//   - manual exp fog (ShaderMaterial bypasses the scene fog)
+//
+// Cost: 1 draw call + ~1100 lightweight points per cloud. The CPU only
+// touches a handful of uniforms per frame. This is the single biggest
+// draw-call cut in the whole game (7 clouds: ~240 calls -> 7 calls).
+// =====================================================================
+
+const CLOUD_VERT = `
+  attribute float aSeed;
+  attribute float aH;
+  attribute float aAng;
+  attribute float aRad;
+  attribute float aSize;
+
+  uniform float uTime;
+  uniform float uRadius;     // cloud radius in meters at scale 1.0
+  uniform float uFlat;       // vertical squash (nimbostratus decks)
+  uniform float uChurn;      // edge churning speed
+  uniform float uSpin;       // base orbital circulation speed
+  uniform float uCoreSpin;   // extra spin for core puffs (mesocyclone)
+  uniform float uTower;      // vertical stretch (stage)
+  uniform float uAnvil;      // anvil top spread multiplier
+  uniform float uFlash;      // in-cloud flash intensity 0..1
+  uniform float uFlashY;     // flash height, local meters
+
+  varying float vShade;
+  varying float vSeed;
+  varying float vFlash;
+  varying float vDist;
+
+  float hash11(float n) { return fract(sin(n) * 43758.5453123); }
+
+  void main() {
+    float seed = aSeed * 6.2831853;
+
+    // Differential rotation: higher puffs + core puffs orbit faster
+    float rot = 1.0 + aH * 0.45 + (1.0 - aRad) * uCoreSpin;
+    float ang = aAng + uTime * uSpin * rot;
+
+    // Living churning edge (two incommensurate sines per puff)
+    float churn = 1.0
+      + 0.10 * sin(uTime * (0.9 * uChurn) + seed * 3.1)
+      + 0.07 * sin(uTime * (1.7 * uChurn) + seed * 7.3);
+
+    // Ellipsoid profile: wide flat base narrowing upward; anvil bulge
+    // at the top for storm stages
+    float yF = aH;                          // 0 base .. 1 top
+    float profile = 1.0 - 0.42 * yF;
+    float anvil = 1.0 + max(0.0, yF - 0.58) * 2.8 * (uAnvil - 1.0);
+    float rad = aRad * churn * profile * anvil;
+
+    float x = cos(ang) * rad;
+    float z = sin(ang) * rad;
+
+    // Vertical column: tower with stage + slow internal breathing
+    float y = (yF - 0.40) * uTower + sin(uTime * 0.5 * uChurn + seed * 5.2) * 0.10;
+
+    vec3 p = vec3(x, y * uFlat, z) * uRadius;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mv;
+
+    float ps = aSize * (14.0 + 30.0 * hash11(aSeed * 7.1));
+    gl_PointSize = min(180.0, ps * (300.0 / max(1.0, -mv.z)));
+
+    // Sunlit-from-above shading (the classic cumulus look)
+    vShade = mix(0.30, 1.05, smoothstep(-0.55, 0.8, y));
+    vSeed = aSeed;
+
+    // In-cloud lightning: puffs near the flash height light from inside
+    vFlash = uFlash * smoothstep(15.0, 0.0, abs(p.y - uFlashY))
+             * (0.5 + 0.5 * hash11(aSeed * 13.7));
+
+    vDist = -mv.z;
+  }
+`;
+
+const CLOUD_FRAG = `
+  uniform vec3 uColorTop;
+  uniform vec3 uColorBase;
+  uniform float uOpacity;
+  uniform float uFogDensity;
+  uniform vec3 uFogColor;
+
+  varying float vShade;
+  varying float vSeed;
+  varying float vFlash;
+  varying float vDist;
+
+  void main() {
+    vec2 q = gl_PointCoord - 0.5;
+    float d = length(q) * 2.0;
+    // Multi-lobe soft puff silhouette, varied per puff via seed
+    float lobe = 0.78 + 0.22 * sin(vSeed * 17.0 + q.x * 9.0) * sin(vSeed * 23.0 + q.y * 7.0);
+    float a = smoothstep(1.0, 0.12, d) * lobe;
+    a *= 0.30; // per-puff density; many overlapping puffs build the body
+    if (a * uOpacity < 0.004) discard;
+
+    vec3 col = mix(uColorBase, uColorTop, clamp(vShade, 0.0, 1.0));
+    // Lightning interior flash: white-hot from inside the cloud
+    col = mix(col, vec3(1.0, 0.97, 0.90), vFlash);
+
+    // Manual exponential fog (matches the scene's FogExp2)
+    float fogF = 1.0 - exp(-uFogDensity * uFogDensity * vDist * vDist);
+    col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
+
+    gl_FragColor = vec4(col, a * uOpacity);
+  }
+`;
+
+/** Stage -> shader parameter table (tower, circulation, churn, anvil). */
+const CLOUD_STAGE_PARAMS = {
+  humilis:      { tower: 1.00, spin: 0.035, coreSpin: 0.10, churn: 0.55 },
+  congestus:    { tower: 1.30, spin: 0.050, coreSpin: 0.20, churn: 0.75 },
+  cumulonimbus: { tower: 1.65, spin: 0.065, coreSpin: 0.35, churn: 1.00 },
+  supercell:    { tower: 1.90, spin: 0.100, coreSpin: 1.10, churn: 1.30 },
+};
+
+class CloudField {
+  /**
+   * One GPU soft-particle volumetric cloud = ONE THREE.Points draw call.
+   * All motion lives in the vertex shader; the CPU only touches uniforms.
+   */
+  constructor(scene, position, particleCount = 1100) {
+    this.scene = scene;
+    const count = particleCount;
+    const positions = new Float32Array(count * 3); // placeholder (motion is in-shader)
+    const seeds = new Float32Array(count);
+    const hs = new Float32Array(count);
+    const angs = new Float32Array(count);
+    const rads = new Float32Array(count);
+    const sizes = new Float32Array(count);
+
+    for (let i = 0; i < count; i++) {
+      seeds[i] = Math.random();
+      hs[i] = Math.pow(Math.random(), 0.85);      // height 0..1, base-weighted
+      angs[i] = Math.random() * Math.PI * 2;
+      rads[i] = Math.pow(Math.random(), 0.62);    // radial fraction, edge-weighted
+      sizes[i] = 0.6 + Math.random() * 0.9;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+    geo.setAttribute('aH', new THREE.BufferAttribute(hs, 1));
+    geo.setAttribute('aAng', new THREE.BufferAttribute(angs, 1));
+    geo.setAttribute('aRad', new THREE.BufferAttribute(rads, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    // Static geometry; fixed loose bounds (shader displaces puffs)
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 12, 0), 320);
+
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: CLOUD_VERT,
+      fragmentShader: CLOUD_FRAG,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+      uniforms: {
+        uTime: { value: 0 },
+        uRadius: { value: 45 },
+        uFlat: { value: 1.0 },
+        uChurn: { value: 0.55 },
+        uSpin: { value: 0.035 },
+        uCoreSpin: { value: 0.10 },
+        uTower: { value: 1.0 },
+        uAnvil: { value: 1.0 },
+        uFlash: { value: 0 },
+        uFlashY: { value: 10 },
+        uColorTop: { value: new THREE.Color(0xf4f8fc) },
+        uColorBase: { value: new THREE.Color(0x9aa7b8) },
+        uOpacity: { value: 0.66 },
+        uFogDensity: { value: 0.0016 },
+        uFogColor: { value: new THREE.Color(0x0a1420) },
+      },
+    });
+
+    this.points = new THREE.Points(geo, this.material);
+    this.points.position.copy(position);
+    this.points.frustumCulled = false; // shader displaces puffs beyond base bounds
+    scene.add(this.points);
+  }
+
+  setStageParams(stage) {
+    const p = CLOUD_STAGE_PARAMS[stage] || CLOUD_STAGE_PARAMS.humilis;
+    const u = this.material.uniforms;
+    u.uTower.value = p.tower;
+    u.uSpin.value = p.spin;
+    u.uCoreSpin.value = p.coreSpin;
+    u.uChurn.value = p.churn;
+  }
+
+  setStageColors(lightHex, darkHex) {
+    this.material.uniforms.uColorTop.value.setHex(lightHex);
+    this.material.uniforms.uColorBase.value.setHex(darkHex);
+  }
+
+  dispose() {
+    this.scene.remove(this.points);
+    this.points.geometry.dispose();
+    this.material.dispose();
+  }
+}
+
+/**
+ * Storm cell. Public API unchanged (pos/stage/setStage/update/dispose/
+ * lifeDuration/elapsed/maxRadius/isSupercell/group) - skills and the
+ * manager keep working. New: movement (vel / orbit), altitude, flat
+ * decks (nimbostratus), stretched walls (derecho), wall clouds.
+ */
 class Cloud {
-  constructor(manager, pos, isSupercellForced, maxRadius) {
+  constructor(manager, pos, isSupercellForced, maxRadius, opts = {}) {
     this.manager = manager;
-    const tex = manager.tex;
     this.scene = manager.scene;
     this.pos = pos.clone();
     this.maxRadius = maxRadius;
     this.isSupercell = isSupercellForced || Math.random() < 0.35;
-    this.stage = 'humilis';
+    this.stage = opts.startStage || 'humilis';
+    this.maxStage = opts.maxStage || (this.isSupercell ? 'supercell' : 'cumulonimbus');
     this.growthTimer = 0;
-    this.growthDuration = 10.0;
-    this.lifeDuration = 120.0;
+    this.growthDuration = opts.growthDuration != null ? opts.growthDuration : 10.0;
+    this.growthDone = !!opts.startStage && opts.startStage !== 'humilis';
+    this.lifeDuration = opts.lifeDuration != null ? opts.lifeDuration : 120.0;
     this.elapsed = 0;
     this.lightningTimer = 0;
     this.rainshaftActive = false;
+    this.rainOnSpawn = !!opts.rainOnSpawn;
 
-    this.group = new THREE.Group();
-    this.group.position.set(pos.x, 90, pos.z);
-    this.scene.add(this.group);
+    // Movement / shaping options
+    this.vel = opts.vel ? opts.vel.clone() : null;      // moving clouds (squall line, derecho)
+    this.orbit = opts.orbit || null;                     // { center, radius, speed, angle }
+    this.altitude = opts.altitude != null ? opts.altitude : 90;
+    this.flat = opts.flat != null ? opts.flat : 1.0;     // vertical squash (nimbostratus deck)
+    this.spinOverride = opts.spin != null ? opts.spin : null; // wall clouds
+    this.anvilSpread = 1.0;
+    this.flash = 0;
+    this.flashY = 10;
 
-    // 3 layers: base (wide, dark), mid, anvil (top)
-    this.layers = [
-      { y: -14, spread: 1.0,  puffs: 12, dark: true,  h: 0.45 },
-      { y: 0,    spread: 0.8,  puffs: 11, dark: false, h: 0.7 },
-      { y: 16,   spread: 0.9,  puffs: 9,  dark: false, h: 0.55 },
-    ];
+    this.field = new CloudField(this.scene,
+      new THREE.Vector3(this.pos.x, this.altitude, this.pos.z),
+      opts.particles != null ? opts.particles : 1100);
+    this.field.material.uniforms.uFlat.value = this.flat;
+    if (this.spinOverride != null) this.field.material.uniforms.uSpin.value = this.spinOverride;
+    this.field.setStageParams(this.stage);
+    this.field.setStageColors(CLOUD_STAGES[this.stage].light, CLOUD_STAGES[this.stage].dark);
 
-    this.matLight = new THREE.SpriteMaterial({
-      map: tex.puff, color: 0xf4f8fc, transparent: true, opacity: 0.62,
-      depthWrite: false, fog: false,
-    });
-    this.matDark = new THREE.SpriteMaterial({
-      map: tex.puff, color: 0x8b97a8, transparent: true, opacity: 0.5,
-      depthWrite: false, fog: false,
-    });
+    this.group = this.field.points; // legacy reference (manager/skills may hold it)
+    this.points = this.field.points;
+    this.groupScale = this.growthDone ? 1.6 : 0.5;
+    this._applyScale();
 
-    this.puffs = [];
-    for (const layer of this.layers) {
-      for (let i = 0; i < layer.puffs; i++) {
-        const mat = layer.dark ? this.matDark : this.matLight;
-        const sp = new THREE.Sprite(mat);
-        const a = Math.random() * Math.PI * 2;
-        const r = Math.sqrt(Math.random()) * 38 * layer.spread;
-        sp.position.set(Math.cos(a) * r, layer.y + (Math.random() - 0.5) * 10, Math.sin(a) * r);
-        const s = 22 + Math.random() * 26;
-        sp.scale.set(s, s * layer.h * (0.8 + Math.random() * 0.4), 1);
-        this.group.add(sp);
-        // Per-puff drift => the cloud morphs slowly (internal circulation)
-        this.puffs.push({
-          sp,
-          baseR: Math.sqrt(sp.position.x * sp.position.x + sp.position.z * sp.position.z),
-          ang: Math.atan2(sp.position.z, sp.position.x),
-          angVel: (0.008 + Math.random() * 0.02) * (Math.random() > 0.5 ? 1 : -1),
-          bob: Math.random() * 10,
-          yBase: sp.position.y,
-        });
-      }
+    if (this.rainOnSpawn) {
+      this.rainshaftActive = true;
+      const rs = this.manager.createRainshaftInternal(
+        this.pos, this.maxRadius * 0.7, 90, 380, true,
+        this.vel ? { vel: this.vel, duration: this.lifeDuration } : { duration: this.lifeDuration });
+      if (this.orbit) rs.orbit = this.orbit; // eyewall rain follows the cell
     }
+  }
 
-    // Supercell mesocyclone: 4 big dark puffs slowly orbiting the core
-    this.meso = [];
-    this.mesoMat = new THREE.SpriteMaterial({
-      map: tex.puff, color: 0x2c2440, transparent: true, opacity: 0,
-      depthWrite: false, fog: false,
-    });
-    for (let i = 0; i < 4; i++) {
-      const sp = new THREE.Sprite(this.mesoMat);
-      const s = 34 + Math.random() * 10;
-      sp.scale.set(s, s * 0.8, 1);
-      sp.position.y = 6;
-      this.group.add(sp);
-      this.meso.push({ sp, a: (i / 4) * Math.PI * 2 });
-    }
-    this.groupScale = 0.5; // current growth scale (for anvil spreading)
-    this.anvilSpread = 1.0; // capped supercell anvil spread
-
-    // In-cloud lightning flash sprites (pooled per cloud: 3)
-    this.flashes = [];
-    for (let i = 0; i < 3; i++) {
-      const m = new THREE.SpriteMaterial({
-        map: tex.puff, color: 0xdfefff, transparent: true, opacity: 0,
-        depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
-      });
-      const sp = new THREE.Sprite(m);
-      sp.visible = false;
-      this.group.add(sp);
-      this.flashes.push({ sp, mat: m, life: 0 });
-    }
+  _applyScale() {
+    const s = this.groupScale;
+    this.points.scale.set(s, s * 0.8, s);
   }
 
   setStage(stage) {
     if (this.stage === stage) return;
     this.stage = stage;
     const c = CLOUD_STAGES[stage];
-    this.matLight.color.setHex(c.light);
-    this.matDark.color.setHex(c.dark);
+    this.field.setStageColors(c.light, c.dark);
+    this.field.setStageParams(stage);
+    if (this.spinOverride != null) this.field.material.uniforms.uSpin.value = this.spinOverride;
+  }
+
+  triggerFlash() {
+    this.flash = 1.0;
+    this.flashY = 2 + Math.random() * 22;
+  }
+
+  /** Fire in-cloud + ground lightning with distance-correct thunder. */
+  _strikeLightning() {
+    const strikePos = _v3b.set(
+      this.pos.x + (Math.random() - 0.5) * this.maxRadius * 0.8,
+      0,
+      this.pos.z + (Math.random() - 0.5) * this.maxRadius * 0.8
+    );
+    const isHyperbolt = this.stage === 'supercell' && Math.random() < 0.45;
+    const color = isHyperbolt ? '#ffffff' : '#00f0ff';
+    this.manager.lightning.strikeBolt(strikePos, 100, color, 0.35, 32);
+    this.manager.lightning.flash(strikePos, color, isHyperbolt ? 1.2 : 0.7, 0.3);
+    this.manager.explosions.createExplosion(strikePos, isHyperbolt ? 16 : 8, 'lightning', isHyperbolt ? 3.0 : 1.2);
+
+    this.triggerFlash();
+
+    // Thunder: light arrives instantly, sound arrives d/343s later -
+    // playThunder schedules the whole rumble at that physical delay.
+    const snd = this.manager.sound;
+    const pp = this.manager.playerPos;
+    if (snd && pp) {
+      const dx = strikePos.x - pp.x, dz = strikePos.z - pp.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      const dist01 = Math.min(1, d / 900);
+      const pan = Math.max(-1, Math.min(1, dx / Math.max(1, d)));
+      snd.playThunder(dist01, pan, isHyperbolt ? 1.15 : 1.0);
+    }
   }
 
   update(dt) {
@@ -829,47 +1116,31 @@ class Cloud {
     if (this.elapsed > this.lifeDuration * 0.85) {
       lifeFade = (this.lifeDuration - this.elapsed) / (this.lifeDuration * 0.15);
     }
-    this.matLight.opacity = 0.62 * lifeFade;
-    this.matDark.opacity = 0.5 * lifeFade;
-    this.mesoMat.opacity = (this.stage === 'supercell' ? 0.7 : 0) * lifeFade;
+    this.field.material.uniforms.uOpacity.value = 0.66 * lifeFade;
+    this.field.material.uniforms.uTime.value = this.elapsed;
 
-    // Dynamic growth (0.5x -> 3x over 10s), stage evolution
-    if (this.growthTimer < this.growthDuration) {
+    // Dynamic growth (0.5x -> 3x), stage evolution along the cap
+    if (!this.growthDone && this.growthTimer < this.growthDuration) {
       this.growthTimer += dt;
       const growthT = this.growthTimer / this.growthDuration;
       const s = 0.5 + growthT * 2.5;
       this.groupScale = s;
-      this.group.scale.set(s, s * 0.8, s);
-      if (growthT > 0.4) this.setStage('congestus');
-      if (growthT > 0.8) {
-        this.setStage(this.isSupercell ? 'supercell' : 'cumulonimbus');
-        if (!this.rainshaftActive) {
-          this.rainshaftActive = true;
-          this.manager.createRainshaftInternal(this.pos, this.maxRadius * 0.6, 90, 380);
-        }
+      this._applyScale();
+      const stages = this.maxStage === 'supercell'
+        ? ['congestus', 'supercell']
+        : (this.maxStage === 'cumulonimbus' ? ['congestus', 'cumulonimbus'] : ['congestus']);
+      if (growthT > 0.4) this.setStage(stages[0]);
+      if (growthT > 0.8) this.setStage(stages[stages.length - 1]);
+      if (!this.rainshaftActive) {
+        this.rainshaftActive = true;
+        this.manager.createRainshaftInternal(this.pos, this.maxRadius * 0.6, 90, 380);
       }
     }
 
-    // Per-puff drift: each puff slowly orbits + bobs => living, morphing cloud
-    for (const p of this.puffs) {
-      p.ang += p.angVel * dt;
-      const wobble = 1 + 0.06 * Math.sin(this.elapsed * 0.5 + p.bob);
-      p.sp.position.x = Math.cos(p.ang) * p.baseR * wobble;
-      p.sp.position.z = Math.sin(p.ang) * p.baseR * wobble;
-      p.sp.position.y = p.yBase + Math.sin(this.elapsed * 0.4 + p.bob) * 1.6;
-    }
-
-    // Mesocyclone rotation (supercell)
+    // Supercell: anvil spreads (capped at 1.6x)
     if (this.stage === 'supercell') {
-      for (const m of this.meso) {
-        m.a += dt * 0.35;
-        m.sp.position.x = Math.cos(m.a) * 16;
-        m.sp.position.z = Math.sin(m.a) * 16;
-      }
-      // Flattened anvil spread (capped at 1.6x)
       this.anvilSpread = Math.min(1.6, this.anvilSpread + dt * 0.04);
-      const s = this.groupScale;
-      this.group.scale.set(s * this.anvilSpread, s * 0.8, s * this.anvilSpread);
+      this.field.material.uniforms.uAnvil.value = this.anvilSpread;
     }
 
     // In-cloud + ground lightning from mature clouds
@@ -878,55 +1149,44 @@ class Cloud {
       const strikeRate = this.stage === 'supercell' ? 0.9 : 1.8;
       if (this.lightningTimer >= strikeRate) {
         this.lightningTimer = 0;
-        const strikePos = _v3b.set(
-          this.pos.x + (Math.random() - 0.5) * this.maxRadius * 0.8,
-          0,
-          this.pos.z + (Math.random() - 0.5) * this.maxRadius * 0.8
-        );
-        const isHyperbolt = this.stage === 'supercell' && Math.random() < 0.45;
-        const color = isHyperbolt ? '#ffffff' : '#00f0ff';
-        this.manager.lightning.strikeBolt(strikePos, 100, color, 0.35, 32);
-        this.manager.lightning.flash(strikePos, color, isHyperbolt ? 1.2 : 0.7, 0.3);
-        this.manager.explosions.createExplosion(strikePos, isHyperbolt ? 16 : 8, 'lightning', isHyperbolt ? 3.0 : 1.2);
-
-        // In-cloud flash: bright additive puff inside the cloud
-        const f = this.flashes.find(x => x.life <= 0) || this.flashes[0];
-        f.life = 0.35;
-        f.sp.visible = true;
-        f.sp.position.set(
-          (Math.random() - 0.5) * 40,
-          5 + Math.random() * 20,
-          (Math.random() - 0.5) * 40
-        );
-        const fs = 30 + Math.random() * 24;
-        f.sp.scale.set(fs, fs * 0.7, 1);
-        f.mat.opacity = 0.9;
+        this._strikeLightning();
       }
     }
 
-    // Flash decay
-    for (const f of this.flashes) {
-      if (f.life > 0) {
-        f.life -= dt;
-        f.mat.opacity = Math.max(0, (f.life / 0.35) * 0.9 * (0.6 + 0.4 * Math.sin(f.life * 80)));
-        if (f.life <= 0) f.sp.visible = false;
-      }
+    // In-cloud flash decay with fast flicker
+    if (this.flash > 0) {
+      this.flash = Math.max(0, this.flash - dt / 0.35);
+      this.field.material.uniforms.uFlash.value =
+        this.flash * (0.65 + 0.35 * Math.sin(this.elapsed * 70));
+      this.field.material.uniforms.uFlashY.value = this.flashY;
     }
 
-    // Gentle horizontal drift
-    this.group.position.x += Math.sin(this.elapsed * 0.1) * dt * 1.5;
-    this.group.position.z += Math.cos(this.elapsed * 0.08) * dt * 1.5;
+    // Movement: orbit (hurricane cells) > linear (squall/derecho) > drift
+    if (this.orbit) {
+      const o = this.orbit;
+      o.angle += dt * o.speed;
+      this.pos.x = o.center.x + Math.cos(o.angle) * o.radius;
+      this.pos.z = o.center.z + Math.sin(o.angle) * o.radius;
+      this.points.position.x = this.pos.x;
+      this.points.position.z = this.pos.z;
+    } else if (this.vel) {
+      this.pos.x += this.vel.x * dt;
+      this.pos.z += this.vel.z * dt;
+      this.points.position.x = this.pos.x;
+      this.points.position.z = this.pos.z;
+    } else {
+      // Gentle horizontal drift
+      this.pos.x += Math.sin(this.elapsed * 0.1) * dt * 1.5;
+      this.pos.z += Math.cos(this.elapsed * 0.08) * dt * 1.5;
+      this.points.position.x = this.pos.x;
+      this.points.position.z = this.pos.z;
+    }
   }
 
   dispose() {
-    this.scene.remove(this.group);
-    this.matLight.dispose();
-    this.matDark.dispose();
-    this.mesoMat.dispose();
-    for (const f of this.flashes) f.mat.dispose();
+    this.field.dispose();
   }
 }
-
 // =====================================================================
 // TSUNAMI - kept from round 2/3 (water wall + foam crest + spray)
 // =====================================================================
@@ -1055,14 +1315,189 @@ class SplashPool {
   }
 }
 
+
+// =====================================================================
+// HAIL FIELD (Round 7)
+// Golf-ball sized ice pellets dropping from a storm cell. ONE instanced
+// mesh (single draw call) for up to 160 stones; SoA state, zero per-frame
+// allocation. Stones fall with wind wobble, shatter on impact (flash +
+// sparks + 50% shatter damage to enemies within radius), or bounce once.
+// =====================================================================
+const HAIL_CAP = 160;
+
+class HailField {
+  constructor(manager, centerPos, radius, duration) {
+    this.manager = manager;
+    this.scene = manager.scene;
+    this.center = centerPos.clone();
+    this.radius = radius;
+    this.duration = duration;
+    this.elapsed = 0;
+    this.windX = (Math.random() - 0.5) * 10;
+    this.windZ = (Math.random() - 0.5) * 10;
+
+    // SoA state (pre-allocated)
+    this.px = new Float32Array(HAIL_CAP);
+    this.py = new Float32Array(HAIL_CAP);
+    this.pz = new Float32Array(HAIL_CAP);
+    this.vx = new Float32Array(HAIL_CAP);
+    this.vy = new Float32Array(HAIL_CAP);
+    this.vz = new Float32Array(HAIL_CAP);
+    this.state = new Uint8Array(HAIL_CAP); // 0 dead, 1 falling, 2 shattering, 3 bouncing
+    this.t = new Float32Array(HAIL_CAP);
+    this.size = new Float32Array(HAIL_CAP);
+    this.seed = new Float32Array(HAIL_CAP);
+    this._cursor = 0;
+    this._acc = 0;
+
+    const geo = new THREE.IcosahedronGeometry(1, 0);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xdfeeff, roughness: 0.35, metalness: 0.05,
+      emissive: 0x223344, emissiveIntensity: 0.25,
+    });
+    this.mesh = new THREE.InstancedMesh(geo, mat, HAIL_CAP);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.castShadow = false;
+    this.mesh.frustumCulled = false;
+    this._m = new THREE.Matrix4();
+    this._q = new THREE.Quaternion();
+    this._s = new THREE.Vector3();
+    this._p = new THREE.Vector3();
+    for (let i = 0; i < HAIL_CAP; i++) this._writeInstance(i, 0);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.mesh);
+  }
+
+  _writeInstance(i, scale) {
+    this._p.set(this.px[i], this.py[i], this.pz[i]);
+    this._s.setScalar(scale);
+    this._q.identity();
+    this._m.compose(this._p, this._q, this._s);
+    this.mesh.setMatrixAt(i, this._m);
+  }
+
+  _spawn() {
+    // Find a dead slot (round-robin scan is fine for 160)
+    let slot = -1;
+    for (let k = 0; k < HAIL_CAP; k++) {
+      const i = (this._cursor + k) % HAIL_CAP;
+      if (this.state[i] === 0) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    this._cursor = (slot + 1) % HAIL_CAP;
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * this.radius * 0.55;
+    this.px[slot] = this.center.x + Math.cos(a) * r;
+    this.py[slot] = 70 + Math.random() * 40;
+    this.pz[slot] = this.center.z + Math.sin(a) * r;
+    this.vx[slot] = this.windX + (Math.random() - 0.5) * 6;
+    this.vy[slot] = -(18 + Math.random() * 12);
+    this.vz[slot] = this.windZ + (Math.random() - 0.5) * 6;
+    this.size[slot] = 0.7 + Math.random() * 0.9; // golf-ball sized
+    this.seed[slot] = Math.random() * 10;
+    this.t[slot] = 0;
+    this.state[slot] = 1;
+  }
+
+  update(dt, enemyList, playerPos) {
+    this.elapsed += dt;
+
+    // Spawn cadence ramps up then tapers
+    const lifeT = this.elapsed / this.duration;
+    if (lifeT < 0.75) {
+      this._acc += dt * (14 + lifeT * 26);
+      while (this._acc >= 1) { this._acc -= 1; this._spawn(); }
+    }
+
+    let shattered = 0;
+    for (let i = 0; i < HAIL_CAP; i++) {
+      const st = this.state[i];
+      if (st === 0) continue;
+      this.t[i] += dt;
+
+      if (st === 1) {
+        // Falling: gravity + wobble
+        this.vy[i] -= 34 * dt;
+        if (this.vy[i] < -62) this.vy[i] = -62;
+        this.px[i] += (this.vx[i] + Math.sin(this.t[i] * 5 + this.seed[i]) * 2.0) * dt;
+        this.pz[i] += (this.vz[i] + Math.cos(this.t[i] * 5 + this.seed[i]) * 2.0) * dt;
+        this.py[i] += this.vy[i] * dt;
+
+        if (this.py[i] <= 0.4) {
+          this.py[i] = 0.4;
+          // Shatter or bounce
+          if (Math.random() < 0.62) {
+            this.state[i] = 2;
+            this.t[i] = 0;
+            shattered++;
+            this._onShatter(i, enemyList, playerPos);
+          } else {
+            this.state[i] = 3;
+            this.t[i] = 0;
+            this.vy[i] = -this.vy[i] * 0.38;
+            this.vx[i] *= 0.55; this.vz[i] *= 0.55;
+          }
+        }
+      } else if (st === 2) {
+        // Shatter fade-out
+        if (this.t[i] > 0.22) { this.state[i] = 0; this._writeInstance(i, 0); }
+        else this._writeInstance(i, this.size[i] * (1 - this.t[i] / 0.22));
+      } else if (st === 3) {
+        // Bounce then settle
+        this.vy[i] -= 34 * dt;
+        this.px[i] += this.vx[i] * dt;
+        this.pz[i] += this.vz[i] * dt;
+        this.py[i] += this.vy[i] * dt;
+        if (this.py[i] <= 0.35 && this.vy[i] < 0) { this.py[i] = 0.35; this.vy[i] = 0; }
+        if (this.t[i] > 0.9) { this.state[i] = 0; this._writeInstance(i, 0); }
+        else this._writeInstance(i, this.size[i]);
+      }
+    }
+
+    // Hail chitter audio (throttled by shatter count)
+    if (shattered > 0 && this.manager.sound) {
+      this.manager.sound.playHail(shattered / 4);
+    }
+
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  _onShatter(i, enemyList, playerPos) {
+    const x = this.px[i], z = this.pz[i];
+    const exp = this.manager.explosions;
+    if (exp) {
+      exp.flashAt(new THREE.Vector3(x, 0.6, z), 0xbfe3ff, 2.2, 0.1);
+      if (Math.random() < 0.4) exp.sparkBurst(new THREE.Vector3(x, 0.6, z), 0xdff4ff, 2.4);
+    }
+    // 50% shatter damage to enemies within 16m (skill: 30% of max HP)
+    if (enemyList && Math.random() < 0.5) {
+      for (const enemy of enemyList) {
+        if (!enemy.mesh) continue;
+        const dx = enemy.mesh.position.x - x, dz = enemy.mesh.position.z - z;
+        if (dx * dx + dz * dz < 16 * 16) {
+          enemy.takeDamage((enemy.maxHp || 100) * 0.30, false);
+          break;
+        }
+      }
+    }
+  }
+
+  dispose() {
+    this.scene.remove(this.mesh);
+    this.mesh.geometry.dispose();
+    this.mesh.material.dispose();
+  }
+}
+
 // =====================================================================
 // MANAGER
 // =====================================================================
 export class CloudWeatherManager {
-  constructor(scene, lightningManager, explosionManager) {
+  constructor(scene, lightningManager, explosionManager, soundSystem = null) {
     this.scene = scene;
     this.lightning = lightningManager;
     this.explosions = explosionManager;
+    this.sound = soundSystem; // round 7: thunder + storm ambience
 
     // Pre-computed shared textures (built once per page - "pre-method")
     this.tex = precomputeWeatherTextures();
@@ -1072,7 +1507,13 @@ export class CloudWeatherManager {
     this.activeTornadoes = [];
     this.activeMicrobursts = [];
     this.activeTsunamis = [];
+    this.activeHail = []; // round 7: hailstorm fields
     this.splashPool = new SplashPool(scene);
+
+    // Round 7: live storm intensity (drives ambience + arena lighting)
+    this.playerPos = null;
+    this._stormLevel = 0;
+    this._stormTimer = 0;
 
     // Rising flood plane for Nimbostratus Flooding
     this.floodPlane = null;
@@ -1083,8 +1524,8 @@ export class CloudWeatherManager {
   }
 
   /** Internal helper: create a rainshaft registered in the manager's list. */
-  createRainshaftInternal(centerPos, width, height, particleCount, register = true) {
-    const rs = new RainShaft(this, centerPos, width, height, particleCount);
+  createRainshaftInternal(centerPos, width, height, particleCount, register = true, opts = null) {
+    const rs = new RainShaft(this, centerPos, width, height, particleCount, opts);
     // register=false -> owned by the caller (e.g. MicroBurst updates/disposes it itself)
     if (register) this.activeRainshafts.push(rs);
     return rs;
@@ -1121,14 +1562,118 @@ export class CloudWeatherManager {
   /**
    * Dynamic Growing Cloud (Cumulus -> Cumulonimbus -> Supercell)
    */
-  spawnGrowingCloud(pos, isSupercellForced = false, maxRadius = 150) {
+  spawnGrowingCloud(pos, isSupercellForced = false, maxRadius = 150, opts = null) {
     // Cap active clouds for perf (oldest expires fast)
     if (this.activeClouds.length >= MAX_ACTIVE_CLOUDS) {
       this.activeClouds[0].lifeDuration = Math.min(this.activeClouds[0].lifeDuration, this.activeClouds[0].elapsed + 6);
     }
-    const cl = new Cloud(this, pos, isSupercellForced, maxRadius);
+    const cl = new Cloud(this, pos, isSupercellForced, maxRadius, opts || {});
     this.activeClouds.push(cl);
     return cl;
+  }
+
+  /**
+   * Round 7 cinematic: a SQUALL LINE - a fast-moving wall of mature storm
+   * cells trailing a rain curtain + gust front. Used by atmospheric
+   * instability / derecho skills. Returns the array of cells.
+   */
+  spawnSquallLine(origin, dirVec, count = 5, speed = 22, cellRadius = 90) {
+    // Cells line up along the PERPENDICULAR (the wall face), with a small
+    // diagonal depth stagger per cell - a real squall line is tilted, not
+    // a straight wall. The whole line translates along dirVec.
+    const cells = [];
+    const perp = new THREE.Vector3(-dirVec.z, 0, dirVec.x);
+    const len = 52; // meters between cells along the wall
+    for (let i = 0; i < count; i++) {
+      const along = (i - (count - 1) * 0.5) * len;
+      const off = origin.clone()
+        .addScaledVector(perp, along)
+        .addScaledVector(dirVec, i * 9); // diagonal tilt
+      cells.push(this.spawnGrowingCloud(off, true, cellRadius, {
+        vel: dirVec.clone().multiplyScalar(speed),
+        startStage: 'cumulonimbus',
+        maxStage: 'cumulonimbus',
+        growthDuration: 2.0,
+        lifeDuration: 40,
+        rainOnSpawn: true,
+        particles: 900,
+      }));
+    }
+    return cells;
+  }
+
+  /**
+   * Round 7 cinematic: a rotating WALL CLOUD - the dark, low, rotating
+   * cloud base that sits over a tornado's updraft.
+   */
+  spawnWallCloud(pos, radius = 40, duration = 12, spin = 0.5) {
+    return this.spawnGrowingCloud(pos, true, radius, {
+      altitude: 55, flat: 0.62, spin,
+      startStage: 'supercell', maxStage: 'supercell',
+      growthDuration: 1.5, lifeDuration: duration,
+      particles: 700, rainOnSpawn: true,
+    });
+  }
+
+  /**
+   * Round 7 cinematic: a full HURRICANE disc - a ring of orbiting storm
+   * cells around a calm eye, an eyewall rain ring, and a ground vortex.
+   */
+  spawnHurricane(center, ringRadius = 80, duration = 16) {
+    const eyeCenter = center.clone();
+    const n = 8;
+    const speed = (Math.PI * 2) / (ringRadius / 16); // orbit period ~ringRadius/16 s
+    const cells = [];
+    for (let i = 0; i < n; i++) {
+      const angle = (i / n) * Math.PI * 2;
+      const orbit = { center: eyeCenter, radius: ringRadius, speed, angle };
+      const p = new THREE.Vector3(
+        eyeCenter.x + Math.cos(angle) * ringRadius, 0,
+        eyeCenter.z + Math.sin(angle) * ringRadius);
+      cells.push(this.spawnGrowingCloud(p, true, 60, {
+        orbit,
+        altitude: 80,
+        startStage: 'supercell', maxStage: 'supercell',
+        growthDuration: 2.5, lifeDuration: duration,
+        particles: 750,
+      }));
+    }
+    // Eyewall rain ring: 4 dense shafts on the ring
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      const p = new THREE.Vector3(
+        eyeCenter.x + Math.cos(a) * ringRadius, 0,
+        eyeCenter.z + Math.sin(a) * ringRadius);
+      this.createRainshaft(p, 46, 150, 380);
+    }
+    return { center: eyeCenter, cells, ringRadius, duration };
+  }
+
+  /**
+   * Round 7: spawn a hailstorm under a storm cell (HAILSTORM skill).
+   */
+  spawnHailstorm(centerPos, radius = 70, duration = 12) {
+    const hf = new HailField(this, centerPos, radius, duration);
+    this.activeHail.push(hf);
+    return hf;
+  }
+
+  /** Current 0..1 storm intensity (used by the arena for sky dimming). */
+  getStormLevel() {
+    return this._stormLevel;
+  }
+
+  /**
+   * Round 7 boot pre-warm: compile the cloud shader once up front so the
+   * first spawned cloud never hitches on a shader compile.
+   */
+  preflight(renderer, camera) {
+    const probe = this.spawnGrowingCloud(new THREE.Vector3(500, 0, 500), false, 80, {
+      lifeDuration: 0.001, particles: 300,
+    });
+    renderer.compile(this.scene, camera);
+    probe.dispose();
+    return 1;
   }
 
   /**
@@ -1161,6 +1706,24 @@ export class CloudWeatherManager {
   }
 
   update(dt, enemyList = [], playerPos = null) {
+    this.playerPos = playerPos;
+    // Round 7: compute live storm intensity at ~2Hz -> storm ambience audio.
+    this._stormTimer += dt;
+    if (this._stormTimer >= 0.5) {
+      this._stormTimer = 0;
+      let lvl = 0;
+      for (const cl of this.activeClouds) {
+        if (cl.stage === 'cumulonimbus' || cl.stage === 'supercell') lvl += 0.22;
+        else if (cl.stage === 'congestus') lvl += 0.10;
+      }
+      lvl += Math.min(0.3, this.activeRainshafts.length * 0.07);
+      lvl += Math.min(0.25, this.activeHail.length * 0.12);
+      if (this.floodPlane) lvl += 0.15;
+      if (this.activeTornadoes.length) lvl += 0.15;
+      this._stormLevel = lvl > 1 ? 1 : lvl;
+      if (this.sound) this.sound.setStormAmbience(this._stormLevel);
+    }
+
     // 1. Rainshafts
     for (let i = this.activeRainshafts.length - 1; i >= 0; i--) {
       const rs = this.activeRainshafts[i];
@@ -1199,6 +1762,16 @@ export class CloudWeatherManager {
       if (cl.elapsed >= cl.lifeDuration) {
         cl.dispose();
         this.activeClouds.splice(i, 1);
+      }
+    }
+
+    // 4b. Hail fields (round 7)
+    for (let i = this.activeHail.length - 1; i >= 0; i--) {
+      const hf = this.activeHail[i];
+      hf.update(dt, enemyList, playerPos);
+      if (hf.elapsed >= hf.duration) {
+        hf.dispose();
+        this.activeHail.splice(i, 1);
       }
     }
 

@@ -213,7 +213,7 @@ export class SettingsModal {
     }
   }
 
-  updateStats(fps, renderMs, debrisCount, particlesCount, lightningCount) {
+  updateStats(fps, renderMs, debrisCount, particlesCount, lightningCount, qgSuffix = '') {
     const fpsEl = document.getElementById('fps-stat');
     const msEl = document.getElementById('ms-stat');
     const debEl = document.getElementById('debris-stat');
@@ -221,7 +221,7 @@ export class SettingsModal {
     const lgtEl = document.getElementById('lightning-stat');
 
     if (fpsEl) fpsEl.textContent = Math.round(fps);
-    if (msEl) msEl.textContent = `${renderMs.toFixed(1)} ms`;
+    if (msEl) msEl.textContent = `${renderMs.toFixed(1)} ms${qgSuffix}`;
     if (debEl) debEl.textContent = debrisCount;
     if (partEl) partEl.textContent = particlesCount;
     if (lgtEl) lgtEl.textContent = lightningCount;

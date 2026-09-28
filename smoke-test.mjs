@@ -21,89 +21,8 @@ process.on('unhandledRejection', (e) => {
   failures++;
 });
 
-// ---------------------------------------------------------------------------
-// DOM / window stubs
-// ---------------------------------------------------------------------------
-const ctx2dStub = new Proxy({}, {
-  get: (t, k) => {
-    if (k === 'createRadialGradient' || k === 'createLinearGradient') return () => ({ addColorStop: () => {} });
-    if (k === 'createImageData') return (w, h) => ({ data: new Uint8ClampedArray((w || 256) * (h || 256) * 4), width: w || 256, height: h || 256 });
-    if (k === 'putImageData' || k === 'drawImage') return () => {};
-    if (k === 'measureText') return () => ({ width: 10 });
-    if (k === 'canvas') return { width: 256, height: 256 };
-    if (k in t) return t[k];
-    return () => {};
-  },
-  set: (t, k, v) => { t[k] = v; return true; },
-});
-
-function makeEl(tag = 'div', id = '') {
-  const el = {
-    tagName: tag.toUpperCase(),
-    id,
-    style: {},
-    className: '',
-    innerHTML: '',
-    textContent: '',
-    value: '1.0',
-    checked: true,
-    disabled: false,
-    parentNode: null,
-    children: [],
-    dataset: {},
-    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    appendChild: (c) => { c.parentNode = el; el.children.push(c); return c; },
-    removeChild: (c) => { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); c.parentNode = null; },
-    closest: () => null,
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    getContext: () => ctx2dStub,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
-  };
-  if (tag === 'canvas') { el.width = 256; el.height = 256; }
-  return el;
-}
-
-const elementRegistry = new Map();
-const getElementById = (id) => {
-  if (!elementRegistry.has(id)) elementRegistry.set(id, makeEl('div', id));
-  return elementRegistry.get(id);
-};
-
-global.window = {
-  addEventListener: () => {},
-  removeEventListener: () => {},
-  innerWidth: 1280,
-  innerHeight: 720,
-  devicePixelRatio: 1,
-  performance,
-  setTimeout,
-  setInterval,
-  clearTimeout,
-  clearInterval,
-};
-global.self = global.window;
-try {
-  Object.defineProperty(globalThis, 'navigator', {
-    value: { getGamepads: () => null, maxTouchPoints: 0 },
-    configurable: true,
-    writable: true,
-  });
-} catch (e) {
-  // navigator already defined and immutable - leave as is
-}
-global.document = {
-  getElementById,
-  createElement: (tag) => makeEl(tag),
-  createTextNode: (t) => ({ textContent: t }),
-  querySelectorAll: () => [],
-  querySelector: () => null,
-  addEventListener: () => {},
-  body: makeEl('body'),
-};
-global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+// (DOM/window stubs extracted to test/dom-stub.mjs)
+await import('./test/dom-stub.mjs');
 
 // ---------------------------------------------------------------------------
 // Import real game code
@@ -194,6 +113,73 @@ ok('Spawned all 7 explosion types + full weather suite');
   for (let i = 0; i < 600; i++) explosions.update(1 / 60);
   if (explosions.getActiveDebrisCount() !== 0) throw new Error('debris never expired after barrage');
   ok(`VFX stress: 300-explosion barrage spawned in ${spawnMs.toFixed(1)}ms, peak ${peakDebris} debris instances, ${400} update frames in ${simMs.toFixed(1)}ms (${(simMs / 400).toFixed(2)}ms/frame), fully expired`);
+}
+
+// Round 7: GPU volumetric cloud - ONE Points object per cloud (draw-call cut)
+{
+  const c = weather.activeClouds[0];
+  if (!c) throw new Error('no active cloud after spawn');
+  if (!(c.points instanceof THREE.Points)) throw new Error('cloud is not a GPU Points object');
+  if (c.group !== c.points) throw new Error('cloud group should be the single Points object');
+  const posAttr = c.points.geometry.attributes;
+  for (const a of ['position', 'aSeed', 'aH', 'aAng', 'aRad', 'aSize']) {
+    if (!posAttr[a]) throw new Error(`cloud geometry missing attribute ${a}`);
+  }
+  // No billboard sprites remain in any cloud
+  let spriteTotal = 0;
+  for (const cl of weather.activeClouds) {
+    (function walk(o) { if (o.isSprite) spriteTotal++; if (o.children) for (const ch of o.children) walk(ch); })(cl.points);
+  }
+  if (spriteTotal > 0) throw new Error(`clouds still use ${spriteTotal} sprite billboards`);
+  ok(`GPU volumetric cloud: ${weather.activeClouds.length} clouds = ${weather.activeClouds.length} draw calls (0 sprite billboards)`);
+}
+
+// Round 7: hail physics + shatter damage + expiry
+{
+  enemies.spawnDummy(new THREE.Vector3(120, 0, 120));
+  const dummy = enemies.enemies[enemies.enemies.length - 1];
+  const hp0 = dummy.hp;
+  weather.spawnHailstorm(new THREE.Vector3(120, 0, 120), 30, 6);
+  if (weather.activeHail.length !== 1) throw new Error('hail field not registered');
+  for (let i = 0; i < 200; i++) {
+    weather.update(1 / 60, enemies.enemies, new THREE.Vector3(120, 0, 120));
+    enemies.update(1 / 60, player);
+  }
+  if (dummy.hp >= hp0) throw new Error(`hail dealt no damage (hp ${hp0} -> ${dummy.hp})`);
+  // Hail must expire on its own
+  for (let i = 0; i < 400; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(120, 0, 120));
+  if (weather.activeHail.length !== 0) throw new Error(`hail never expired (${weather.activeHail.length})`);
+  ok(`Hailstorm physics: dummy took ${Math.round(hp0 - dummy.hp)} damage, field expired`);
+}
+
+// Round 7: moving cloud cinematics (squall line, hurricane orbit, wall cloud)
+{
+  const origin = new THREE.Vector3(-200, 0, -200);
+  const dir = new THREE.Vector3(1, 0, 0);
+  const line = weather.spawnSquallLine(origin, dir, 4, 20, 90);
+  const before = line[0].pos.x;
+  for (let i = 0; i < 60; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  if (!(line[0].pos.x > before + 15)) throw new Error(`squall cell did not move (${before} -> ${line[0].pos.x})`);
+  if (line[0].points.position.x !== line[0].pos.x) throw new Error('cloud points object did not follow cell pos');
+
+  const hur = weather.spawnHurricane(new THREE.Vector3(300, 0, 300), 80, 20);
+  const ang0 = hur.cells[0].orbit.angle;
+  for (let i = 0; i < 60; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  if (Math.abs(hur.cells[0].orbit.angle - ang0) < 0.05) throw new Error('hurricane cells are not orbiting');
+
+  const wall = weather.spawnWallCloud(new THREE.Vector3(0, 0, 250), 50, 8, 0.6);
+  if (wall.altitude !== 55 || wall.flat !== 0.62) throw new Error('wall cloud shaping options not applied');
+  ok(`Squall line + hurricane orbit + wall cloud all simulate (${line[0].pos.x.toFixed(0)}m drift, orbit Δ${(hur.cells[0].orbit.angle - ang0).toFixed(2)}rad)`);
+}
+
+// Round 7: storm level + ambience drive (sound is a no-op stub in Node)
+{
+  for (let i = 0; i < 300; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  const lvl = weather.getStormLevel();
+  if (!(lvl > 0)) throw new Error('storm level never rose with active storm cells');
+  if (typeof sound.setStormAmbience !== 'function') throw new Error('sound.setStormAmbience missing');
+  sound.setStormAmbience(lvl); // must not throw with ctx === null
+  ok(`Storm intensity driving ambience (level ${lvl.toFixed(2)})`);
 }
 
 // Lightning variants
