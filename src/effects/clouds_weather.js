@@ -12,9 +12,10 @@ import * as THREE from 'three';
  *   - Radial dust texture (ground dust skirts & microburst donut)
  *   - Vertical streak noise (rain curtain sheets)
  *
- *  RAIN:   LineSegments streaks (one draw call per shaft) - each drop is a
- *          short segment aligned with its slanted velocity, plus 5 scrolling
- *          rain-curtain sheets and pooled ground splash rings.
+ *  RAIN:   GPU-simulated Points drops (one draw call per shaft) - each drop
+ *          falls/wraps/drifts entirely in the vertex shader from uTime
+ *          (zero CPU per frame), plus 5 scrolling rain-curtain sheets and
+ *          pooled ground splash rings.
  *  TORNADO: 16 billboard funnel slices with per-slice TEXTURE ROTATION
  *          (differential rotation, faster near the ground), an hourglass
  *          kink, top-lag bend, dark mesocyclone tint, orbiting debris and
@@ -249,11 +250,20 @@ const _v3a = new THREE.Vector3();
 const _v3b = new THREE.Vector3();
 
 // =====================================================================
-// RAINSHAFT - streak lines + curtain sheets + splash rings + mist
+// RAINSHAFT - GPU precipitation + curtain sheets + splash rings + mist
 // =====================================================================
 const MIST_PER_SHAFT = 5;
 
 class RainShaft {
+  // ------------------------------------------------------------------
+  // GPU PRECIPITATION (Rework v4):
+  // The old shaft simulated every drop on the CPU (fall + streak mirror
+  // + wrap = ~10k float ops AND two full buffer uploads per shaft per
+  // frame; max-storm scenes run 14-26 shafts simultaneously). The rework
+  // moves the entire simulation into the vertex shader: drops are seeded
+  // once at spawn and fall/wrap/drift purely from a uTime uniform.
+  // Per-frame CPU cost: 4 uniform writes. Buffer uploads: ZERO.
+  // ------------------------------------------------------------------
   constructor(manager, centerPos, width, height, particleCount, opts = null) {
     const tex = manager.tex;
     const count = particleCount;
@@ -263,66 +273,94 @@ class RainShaft {
     this.height = height;
     this.count = count;
     this.elapsed = 0;
+    this.simTime = Math.random() * 40; // desync shafts so they don't pulse together
     this.duration = opts && opts.duration != null ? opts.duration : 12.0;
-    // Round 7: optional movement so rain can trail a moving squall cell
+    // Optional movement so rain can trail a moving squall cell
     // or follow a hurricane eyewall orbit.
     this.vel = opts && opts.vel ? opts.vel.clone() : null;
     this.orbit = opts && opts.orbit ? opts.orbit : null;
     this.windX = (Math.random() - 0.5) * 9;
     this.windZ = (Math.random() - 0.5) * 9;
+    this._env = 0;
+    this._splashTimer = 0;
 
-    // PRE-ALLOCATED buffers (pre-method): 2 vertices per drop (top, bottom)
-    this.positions = new Float32Array(count * 6);
-    this.velX = new Float32Array(count);
-    this.velY = new Float32Array(count);
-    this.velZ = new Float32Array(count);
-
+    // Seed attributes (written ONCE at spawn - never re-uploaded):
+    //   position = spawn offset on a unit disc scaled to the shaft radius
+    //   aSpeed   = fall speed m/s (58-100, as the old CPU sim)
+    //   aSeed    = per-drop phase offset so drops don't fall in lockstep
+    const offsets = new Float32Array(count * 3);
+    const speeds = new Float32Array(count);
+    const seeds = new Float32Array(count);
     for (let i = 0; i < count; i++) {
-      this.respawnDrop(i, true);
-      this.velX[i] = this.windX + (Math.random() - 0.5) * 5;
-      this.velY[i] = -(58 + Math.random() * 42);
-      this.velZ[i] = this.windZ + (Math.random() - 0.5) * 5;
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(Math.random()) * (width * 0.5);
+      offsets[i * 3] = Math.cos(a) * r;
+      offsets[i * 3 + 1] = 0;
+      offsets[i * 3 + 2] = Math.sin(a) * r;
+      speeds[i] = 58 + Math.random() * 42;
+      seeds[i] = Math.random();
     }
 
     const geo = new THREE.BufferGeometry();
-    const posAttr = new THREE.BufferAttribute(this.positions, 3);
-    posAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute('position', posAttr);
+    geo.setAttribute('position', new THREE.BufferAttribute(offsets, 3));
+    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speeds, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, height * 0.5, 0), width + height);
 
-    this.mat = new THREE.LineBasicMaterial({
-      color: 0xd8ebff,
+    this.dropMat = new THREE.ShaderMaterial({
       transparent: true,
-      opacity: 0.55,
       depthWrite: false,
       fog: false,
+      uniforms: {
+        uTime: { value: 0 },
+        uCenter: { value: this.center.clone() },
+        uHeight: { value: height },
+        uWind: { value: new THREE.Vector2(this.windX, this.windZ) },
+        uOpacity: { value: 0.6 },
+        uMap: { value: tex.rainStreak },
+      },
+      vertexShader: /* glsl */`
+        attribute float aSpeed;
+        attribute float aSeed;
+        uniform float uTime;
+        uniform vec3 uCenter;
+        uniform float uHeight;
+        uniform vec2 uWind;
+        varying float vFade;
+        void main() {
+          // Fall from the cloud base to the ground, then wrap (mod)
+          float cycle = uHeight / aSpeed;
+          float t = mod(uTime + aSeed * cycle, cycle);
+          vec3 p;
+          p.x = position.x + uWind.x * t * 0.35;       // slanted drift
+          p.z = position.z + uWind.y * t * 0.35;
+          p.y = uHeight * 0.92 - aSpeed * t;           // base -> ground
+          p += uCenter;
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          gl_PointSize = 4.5 * (300.0 / max(1.0, -mv.z));
+          // Fade out right at the ground and right at the cloud base
+          vFade = smoothstep(0.0, 6.0, p.y) * smoothstep(uHeight * 0.95, uHeight * 0.8, p.y);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        uniform sampler2D uMap;
+        uniform float uOpacity;
+        varying float vFade;
+        void main() {
+          vec4 tex = texture2D(uMap, gl_PointCoord);
+          float a = tex.a * uOpacity * vFade;
+          if (a < 0.01) discard;
+          gl_FragColor = vec4(vec3(0.86, 0.93, 1.0), a);
+        }`,
     });
-    this.lines = new THREE.LineSegments(geo, this.mat);
-    this.lines.frustumCulled = false;
-    this.scene.add(this.lines);
-
-    // Round 8: visible precipitation - every drop also renders as a
-    // textured streak Point (sizeAttenuated). LineBasicMaterial is 1px on
-    // high-DPI displays and was invisible; the Points give real, readable
-    // rain at every zoom distance. ONE draw call for all drops.
-    this.dropPos = new Float32Array(count * 3);
-    this.dropGeo = new THREE.BufferGeometry();
-    const dAttr = new THREE.BufferAttribute(this.dropPos, 3);
-    dAttr.setUsage(THREE.DynamicDrawUsage);
-    this.dropGeo.setAttribute('position', dAttr);
-    this.dropMat = new THREE.PointsMaterial({
-      map: tex.rainStreak,
-      color: 0xdcecff,
-      transparent: true,
-      opacity: 0.6,
-      depthWrite: false,
-      size: 4.5, // world-meter streak length
-      sizeAttenuation: true,
-      fog: false,
-    });
-    this.drops = new THREE.Points(this.dropGeo, this.dropMat);
+    this.dropGeo = geo;
+    this.drops = new THREE.Points(geo, this.dropMat);
     this.drops.frustumCulled = false;
     this.drops.renderOrder = 1;
     this.scene.add(this.drops);
+
+    // Compatibility alias for systems that tinted the old LineBasicMaterial
+    this.mat = this.dropMat;
 
     // Rain curtain sheets (scrolling streak texture) - the visible "shaft"
     this.curtainGroup = new THREE.Group();
@@ -343,8 +381,7 @@ class RainShaft {
       depthWrite: false,
       fog: false,
     });
-    // Round 7: merge the 5 curtain sheets into ONE mesh (was 5 draw calls
-    // per shaft). Each sheet is a Y-rotated quad; corners baked once.
+    // The 5 curtain sheets are merged into ONE mesh (5 quads, baked corners).
     const sheetGeo = new THREE.PlaneGeometry(sheetW, sheetH);
     const base = sheetGeo.attributes.position.array; // 4 corners of the XY quad
     const merged = new THREE.BufferGeometry();
@@ -377,25 +414,24 @@ class RainShaft {
     sheetGeo.dispose();
     this.scene.add(this.curtainGroup);
 
-    // Ground mist (Round 7: ONE Points draw call, was 5 sprite draw calls)
+    // Ground mist: ONE static Points draw call (opacity animates only)
     const MIST = MIST_PER_SHAFT;
-    this.mistPos = new Float32Array(MIST * 3);
-    this.mistPhase = new Float32Array(MIST);
+    const mistPos = new Float32Array(MIST * 3);
     for (let i = 0; i < MIST; i++) {
       const a = (i / MIST) * Math.PI * 2 + Math.random();
       const r = Math.random() * width * 0.4;
-      this.mistPos[i * 3] = centerPos.x + Math.cos(a) * r;
-      this.mistPos[i * 3 + 1] = 2.5 + Math.random() * 3;
-      this.mistPos[i * 3 + 2] = centerPos.z + Math.sin(a) * r;
-      this.mistPhase[i] = Math.random() * 10;
+      mistPos[i * 3] = Math.cos(a) * r;
+      mistPos[i * 3 + 1] = 2.5 + Math.random() * 3;
+      mistPos[i * 3 + 2] = Math.sin(a) * r;
     }
     this.mistGeo = new THREE.BufferGeometry();
-    this.mistGeo.setAttribute('position', new THREE.BufferAttribute(this.mistPos, 3));
+    this.mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
     this.mistMat = new THREE.PointsMaterial({
       map: tex.puff, color: 0xbcd2e8, transparent: true, opacity: 0.14,
       depthWrite: false, size: width * 0.4, sizeAttenuation: true, fog: false,
     });
     this.mist = new THREE.Points(this.mistGeo, this.mistMat);
+    this.mist.position.set(centerPos.x, 0, centerPos.z);
     this.mist.frustumCulled = false;
     this.scene.add(this.mist);
 
@@ -403,107 +439,71 @@ class RainShaft {
     this.splashPool = manager.splashPool;
   }
 
-  respawnDrop(i, initial = false) {
-    const a = Math.random() * Math.PI * 2;
-    const r = Math.sqrt(Math.random()) * (this.width * 0.5);
-    this.positions[i * 6 + 0] = this.center.x + Math.cos(a) * r;
-    this.positions[i * 6 + 1] = initial
-      ? this.center.y + Math.random() * this.height * 0.9
-      : this.center.y + (Math.random() * 0.3 + 0.65) * this.height;
-    this.positions[i * 6 + 2] = this.center.z + Math.sin(a) * r;
+  /** External intensity override (e.g. MicroBurst inner rain fade). */
+  setIntensity(x) {
+    this._intensity = Math.max(0, Math.min(1, x));
   }
 
   update(dt) {
     this.elapsed += dt;
+    this.simTime += dt;
     const lifeT = this.elapsed / this.duration;
     const env = Math.min(1, lifeT * 5) * Math.min(1, (1 - lifeT) * 4);
-    this.mat.opacity = 0.55 * env;
-    this.curtainMat.opacity = 0.3 * env;
-    this.dropMat.opacity = 0.6 * env;
-    this.curtainTex.offset.y -= dt * 1.6; // rain scrolling down the sheets
-    this.curtainGroup.rotation.y += dt * 0.15;
+    this._env = env;
+    const intensity = this._intensity != null ? this._intensity : 1.0;
 
-    // Round 7: translate the whole shaft (drops + curtain + mist) when it
-    // follows a moving squall cell or an eyewall orbit.
-    let dx = 0, dz = 0;
+    // GPU uniforms (the entire "simulation")
+    this.dropMat.uniforms.uTime.value = this.simTime;
+    const op = 0.6 * env * intensity;
+    this.dropMat.uniforms.uOpacity.value = op;
+    this.dropMat.opacity = op; // observable for HUD/tests
+
+    // Follow a moving squall cell / hurricane orbit: translate the seed
+    // space via the uCenter uniform - no buffer rewrites.
     if (this.orbit) {
       const o = this.orbit;
-      const nx = o.center.x + Math.cos(o.angle) * o.radius;
-      const nz = o.center.z + Math.sin(o.angle) * o.radius;
-      dx = nx - this.center.x;
-      dz = nz - this.center.z;
-      this.center.x = nx; this.center.z = nz;
+      this.center.x = o.center.x + Math.cos(o.angle) * o.radius;
+      this.center.z = o.center.z + Math.sin(o.angle) * o.radius;
+      this.dropMat.uniforms.uCenter.value.copy(this.center);
+      this.curtainGroup.position.x = this.center.x;
+      this.curtainGroup.position.z = this.center.z;
+      this.mist.position.x = this.center.x;
+      this.mist.position.z = this.center.z;
     } else if (this.vel) {
-      dx = this.vel.x * dt;
-      dz = this.vel.z * dt;
-      this.center.x += dx;
-      this.center.z += dz;
-    }
-    if (dx !== 0 || dz !== 0) {
-      const pos = this.positions;
-      for (let i = 0; i < this.count; i++) {
-        const i6 = i * 6, i3 = i * 3;
-        pos[i6] += dx; pos[i6 + 2] += dz;
-        pos[i6 + 3] += dx; pos[i6 + 5] += dz;
-        this.dropPos[i3] += dx; this.dropPos[i3 + 2] += dz;
-      }
-      this.curtainGroup.position.x += dx;
-      this.curtainGroup.position.z += dz;
-      this.mist.position.x += dx;
-      this.mist.position.z += dz;
+      this.center.x += this.vel.x * dt;
+      this.center.z += this.vel.z * dt;
+      this.dropMat.uniforms.uCenter.value.copy(this.center);
+      this.curtainGroup.position.x = this.center.x;
+      this.curtainGroup.position.z = this.center.z;
+      this.mist.position.x = this.center.x;
+      this.mist.position.z = this.center.z;
     }
 
-    const pos = this.positions;
-    const streak = 0.05; // seconds of velocity visualized as streak length
-    for (let i = 0; i < this.count; i++) {
-      const i6 = i * 6, i3 = i * 3;
-      pos[i6 + 0] += this.velX[i] * dt;
-      pos[i6 + 1] += this.velY[i] * dt;
-      pos[i6 + 2] += this.velZ[i] * dt;
-      // Mirror the top vertex into the precipitation Points buffer
-      this.dropPos[i3] = pos[i6];
-      this.dropPos[i3 + 1] = pos[i6 + 1];
-      this.dropPos[i3 + 2] = pos[i6 + 2];
+    // Curtain + mist fades
+    this.curtainMat.opacity = 0.3 * env * intensity;
+    this.curtainTex.offset.y -= dt * 1.6; // rain scrolling down the sheets
+    this.curtainGroup.rotation.y += dt * 0.15;
+    this.mistMat.opacity = 0.14 * env * intensity;
 
-      const topY = pos[i6 + 1];
-      const botY = topY + this.velY[i] * streak;
-
-      if (botY <= 0.2) {
-        // Ground hit: pooled splash ring (statistically, not per drop)
-        if (Math.random() < 0.09) this.splashPool.spawn(pos[i6 + 0], pos[i6 + 2]);
-        this.respawnDrop(i);
-        pos[i6 + 1] += (this.height * 0.02) * Math.random();
+    // Ground splashes: statistical emitter at the same average rate the old
+    // per-drop coin-flip produced (~20/s), without tracking every drop.
+    if (env > 0.05 && intensity > 0.05) {
+      this._splashTimer += dt * 18 * env * intensity;
+      while (this._splashTimer >= 1) {
+        this._splashTimer -= 1;
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.sqrt(Math.random()) * this.width * 0.5;
+        this.splashPool.spawn(this.center.x + Math.cos(a) * r, this.center.z + Math.sin(a) * r);
       }
-
-      // Streak: bottom vertex trails behind along velocity
-      pos[i6 + 3] = pos[i6 + 0] - this.velX[i] * streak;
-      pos[i6 + 4] = topY - this.velY[i] * streak; // velY negative => +len
-      pos[i6 + 5] = pos[i6 + 2] - this.velZ[i] * streak;
-    }
-    this.lines.geometry.attributes.position.needsUpdate = true;
-    this.dropGeo.attributes.position.needsUpdate = true;
-
-    // Mist drift + fade (single Points buffer, in-place)
-    {
-      const mp = this.mistPos;
-      for (let m = 0; m < MIST_PER_SHAFT; m++) {
-        mp[m * 3] += Math.sin(this.elapsed * 0.4 + m * 2) * dt * 2;
-        mp[m * 3 + 2] += Math.cos(this.elapsed * 0.3 + m * 1.7) * dt * 1.5;
-      }
-      this.mistGeo.attributes.position.needsUpdate = true;
-      this.mistMat.opacity = 0.14 * env;
     }
   }
 
   dispose() {
-    this.scene.remove(this.lines);
     this.scene.remove(this.drops);
     this.scene.remove(this.curtainGroup);
-    this.mat.dispose();
     this.dropMat.dispose();
     this.curtainMat.dispose();
     this.curtainTex.dispose();
-    this.lines.geometry.dispose();
     this.dropGeo.dispose();
     if (this.curtainMesh) this.curtainMesh.geometry.dispose();
     this.scene.remove(this.mist);
@@ -662,7 +662,13 @@ class Tornado {
     this.debris.geometry.attributes.position.needsUpdate = true;
     this.debrisMat.opacity = 0.85 * this.intensity;
 
-    // Enemy suction toward the vortex core
+    // Enemy suction toward the vortex core.
+    // ACCURACY + PERF: damage is applied in 0.25s ticks (62.5/tick = same
+    // 250 DPS) instead of a sub-pixel-per-frame trickle that spawned dozens
+    // of tiny floating numbers every second.
+    this._suckTick = (this._suckTick || 0) + dt;
+    const doTick = this._suckTick >= 0.25;
+    if (doTick) this._suckTick = 0;
     const suckRadius = 60.0;
     for (const enemy of enemyList) {
       if (!enemy.mesh) continue;
@@ -673,7 +679,7 @@ class Tornado {
         const pull = (14.0 / dist) * dt;
         enemy.mesh.position.x += dx * pull;
         enemy.mesh.position.z += dz * pull;
-        enemy.takeDamage(250 * dt, false);
+        if (doTick) enemy.takeDamage(62.5, false, 'status');
       }
     }
   }
@@ -829,7 +835,7 @@ class MicroBurst {
     // Inner rain fades with the event
     if (this.rain) {
       this.rain.update(dt);
-      this.rain.mat.opacity = 0.34 * Math.max(0, 1 - st / (this.duration * 0.7));
+      this.rain.setIntensity(Math.max(0, 1 - st / (this.duration * 0.7)));
     }
   }
 
@@ -1597,8 +1603,8 @@ export class CloudWeatherManager {
   }
 
   /**
-   * Spawns a fluid rainshaft: slanted streak lines + scrolling rain-curtain
-   * sheets + ground mist + splash rings.
+   * Spawns a fluid rainshaft: GPU-simulated streak drops + scrolling
+   * rain-curtain sheets + ground mist + splash rings.
    */
   createRainshaft(centerPos, width = 60, height = 150, particleCount = 450) {
     return this.createRainshaftInternal(centerPos, width, height, particleCount);
@@ -1729,16 +1735,20 @@ export class CloudWeatherManager {
   }
 
   /**
-   * Round 7 boot pre-warm: compile the cloud shader once up front so the
-   * first spawned cloud never hitches on a shader compile.
+   * Boot pre-warm: compile the cloud shader AND the GPU rain shader once up
+   * front so the first spawned cloud / storm never hitches on a compile.
    */
   preflight(renderer, camera) {
     const probe = this.spawnGrowingCloud(new THREE.Vector3(500, 0, 500), false, 80, {
       lifeDuration: 0.001, particles: 300,
     });
+    // One minimal rain shaft: warms the precipitation program (removed the
+    // same frame, so nothing is visible or simulated afterwards)
+    const probeRain = this.createRainshaftInternal(new THREE.Vector3(500, 0, 500), 20, 40, 8, false, { duration: 0.001 });
     renderer.compile(this.scene, camera);
     probe.dispose();
-    return 1;
+    probeRain.dispose();
+    return 2;
   }
 
   /**

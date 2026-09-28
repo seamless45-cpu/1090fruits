@@ -1,17 +1,28 @@
 import * as THREE from 'three';
 
 /**
- * 3D 1090 Fruits - Camera & Shake Controller
+ * 3D 1090 Fruits - Cinematic Third-Person Camera (REWORK v4)
  *
- * SPECIFICATIONS:
- * 1. Camera Zooming: Max range 300 meters. (Accurate 3.0m - 300.0m range)
- * 2. Camera zoom compatibility: PC (wheel, keys), Mobile (pinch gestures, slider),
- *    Console (gamepad right stick/triggers), Laptop (trackpad), TV (UI buttons).
+ * DESIGN: the rig parks BEHIND and ABOVE the operative ("behind-top"):
+ *   - default elevation 0.62 rad (~35.5°) looking down at the arena
+ *   - default range 14 m, so the hero reads in the lower third of frame
+ *   - focus point leads the player's motion (velocity look-ahead)
+ *   - gentle auto-follow keeps the camera behind the movement direction
+ *
+ * ACCURACY:
+ *   - ALL smoothing is frame-rate independent: exponential decay
+ *     `1 - exp(-k*dt)` (identical convergence at 30, 60, 144 fps),
+ *     never the framerate-dependent `min(1, dt*k)` lerp.
+ *
+ * SPECIFICATIONS (unchanged):
+ * 1. Camera Zooming: accurate 3.0m - 300.0m range (matches the UI slider).
+ * 2. Zoom compatibility: PC (wheel, keys), Mobile (pinch, slider),
+ *    Console (gamepad), Laptop (trackpad), TV (UI buttons).
  * 3. Camera Shake Effect:
- *    - STRICTLY AXIAL: high-frequency random positional offsets ONLY on the X, Y and Z
- *      axes. The camera's orientation (pitch / yaw / roll) is FROZEN for the duration
- *      of each shaken frame - it is computed once from the un-shaken base pose and is
- *      never modified by the shake.
+ *    - STRICTLY AXIAL: high-frequency random positional offsets ONLY on the
+ *      X, Y and Z axes. The camera's orientation (pitch / yaw / roll) is
+ *      FROZEN for the duration of each shaken frame - it is computed once
+ *      from the un-shaken base pose and is never modified by the shake.
  *    - Implementation guarantee: camera.position = basePos + axialOffset
  *      camera.quaternion  = baseQuaternion (unchanged by shake)
  *      -> zero rotational shake, zero aiming drift, by construction.
@@ -22,29 +33,48 @@ import * as THREE from 'three';
 // (intensity 60+) playable while still feeling violent.
 const SHAKE_HARD_CAP = 9.0;
 
+// Frame-rate independent smoothing rates (1/s). Higher = snappier.
+const FOLLOW_RATE = 9.5;    // focus point chase
+const ZOOM_RATE = 7.5;      // distance dolly
+const ROT_RATE = 13.0;      // pitch / yaw orbit
+const LOOKAHEAD_MAX = 2.6;  // meters of lead in the movement direction
+const LOOKAHEAD_RATE = 3.2; // look-ahead ease speed
+
 export class CameraController {
   constructor(camera, domElement) {
     this.camera = camera;
     this.domElement = domElement;
 
-    // Zoom limits (Round 8: wide tactical range so whole storms read)
-    this.minZoom = 3.0; // 3 meters (close over-shoulder)
-    this.maxZoom = 700.0; // 700 meters (maximum orbital tactical distance)
-    this.targetZoom = 42.0; // Default third person distance
-    this.currentZoom = 42.0;
+    // ----- Zoom (accurate metric range, matches the HUD slider 3-300) -----
+    this.minZoom = 3.0;
+    this.maxZoom = 300.0;
+    // BEHIND-TOP default: 14 m back, ~35° elevation => camera sits above and
+    // behind the operative's shoulders looking down into the arena.
+    this.targetZoom = 14.0;
+    this.currentZoom = 14.0;
 
-    // Orbit angles
-    this.targetPitch = 0.35; // radians (elevation angle)
-    this.currentPitch = 0.35;
-    this.minPitch = -0.3;
-    this.maxPitch = 1.45; // ~83 degrees (high angle)
+    // ----- Orbit angles -----
+    this.targetPitch = 0.62;  // behind-top elevation (radians)
+    this.currentPitch = 0.62;
+    this.minPitch = -0.25;
+    this.maxPitch = 1.45;     // ~83° (near top-down)
 
-    this.targetYaw = 0.0;
+    this.targetYaw = 0.0;     // 0 => camera due behind the player (player faces -Z)
     this.currentYaw = 0.0;
 
-    // Tracking target (player position)
-    this.targetPosition = new THREE.Vector3(0, 1.6, 0);
-    this.smoothedTarget = new THREE.Vector3(0, 1.6, 0);
+    // ----- Auto-follow: ease yaw so the rig stays behind the motion -----
+    this.autoFollow = true;
+    this._manualOrbitTimer = 0;     // grace after manual orbiting
+    this._followYawRate = 1.15;     // rad/s cap (~66°/s, cinematic drift)
+
+    // ----- Tracking target (player position) -----
+    this.targetPosition = new THREE.Vector3(0, 1.5, 0);
+    this.smoothedTarget = new THREE.Vector3(0, 1.5, 0);
+    this._lastTargetPos = new THREE.Vector3(0, 1.5, 0);
+
+    // Velocity look-ahead state (derived purely from target motion)
+    this._lookAhead = new THREE.Vector3();
+    this._smoothedVel = new THREE.Vector3();
 
     // Mouse / Touch interaction state
     this.isRightMouseDown = false;
@@ -66,6 +96,8 @@ export class CameraController {
     this._localOffset = new THREE.Vector3();
     this._worldOffset = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
+    this._focus = new THREE.Vector3();
+    this._moveDelta = new THREE.Vector3();
 
     // Bind event listeners
     this.initEventListeners();
@@ -102,8 +134,11 @@ export class CameraController {
       if (this.isRightMouseDown || (this.isLeftMouseDown && !e.target.closest('.bottom-inventory-bar') && !e.target.closest('.skill-panel-container'))) {
         const deltaX = e.clientX - this.lastPointerX;
         const deltaY = e.clientY - this.lastPointerY;
+        if (deltaX !== 0 || deltaY !== 0) {
+          this._manualOrbitTimer = 1.6; // disengage auto-follow while the user orbits
+        }
 
-        // Sensitivity
+        // Sensitivity (scaled by |dt| of the event is unnecessary; px are px)
         const rotSpeed = 0.005;
         this.targetYaw -= deltaX * rotSpeed;
         this.targetPitch = Math.max(this.minPitch, Math.min(this.maxPitch, this.targetPitch + deltaY * rotSpeed));
@@ -112,7 +147,8 @@ export class CameraController {
       this.lastPointerY = e.clientY;
     });
 
-    // Zoom: PC Mouse Wheel & Laptop Trackpad Pinch
+    // Zoom: PC Mouse Wheel & Laptop Trackpad Pinch (exponential steps = constant
+    // perceived speed at any zoom level)
     window.addEventListener('wheel', (e) => {
       if (e.target.closest('.modal-body-scroll') || e.target.closest('.skill-list')) {
         return; // Allow modal/list scrolling
@@ -168,6 +204,7 @@ export class CameraController {
       } else if (e.touches.length === 1 && !e.target.closest('.skill-panel-container')) {
         const deltaX = e.touches[0].clientX - this.lastPointerX;
         const deltaY = e.touches[0].clientY - this.lastPointerY;
+        if (deltaX !== 0 || deltaY !== 0) this._manualOrbitTimer = 1.6;
         const rotSpeed = 0.007;
         this.targetYaw -= deltaX * rotSpeed;
         this.targetPitch = Math.max(this.minPitch, Math.min(this.maxPitch, this.targetPitch + deltaY * rotSpeed));
@@ -232,10 +269,9 @@ export class CameraController {
     let effectiveIntensity = baseIntensity * this.shakeScale;
 
     if (explosionOrigin) {
-      // Calculate distance between camera/player and explosion origin in accurate meters
+      // Distance falloff in accurate meters - closer blast = violent throw,
+      // distant blast = faint tremor (1 / (1 + (d/22)^1.4)).
       const dist = this.targetPosition.distanceTo(explosionOrigin);
-      // Falloff curve: 1 / (1 + (dist / 22)^1.4)
-      // Closer explosion -> massive displacement, far explosion -> faint tremor
       const falloff = 1.0 / (1.0 + Math.pow(dist / 22.0, 1.4));
       effectiveIntensity *= falloff;
     }
@@ -289,6 +325,7 @@ export class CameraController {
       const deadzone = 0.15;
       if (Math.abs(gp.axes[2]) > deadzone) {
         this.targetYaw -= gp.axes[2] * 0.04;
+        this._manualOrbitTimer = 1.6;
       }
       if (Math.abs(gp.axes[3]) > deadzone) {
         this.targetPitch = Math.max(this.minPitch, Math.min(this.maxPitch, this.targetPitch + gp.axes[3] * 0.03));
@@ -313,25 +350,89 @@ export class CameraController {
   }
 
   /**
-   * Frame update
+   * Frame update.
+   *
+   * PIPELINE:
+   *   1. focus point  = player + 1.5m + velocity look-ahead (exp-damped)
+   *   2. auto-follow  = ease yaw to stay behind the motion direction
+   *   3. orbit angles = exp-damped toward targets (framerate independent)
+   *   4. base pose    = spherical offset from focus (BEHIND-TOP framing)
+   *   5. axial shake  = translation only, quaternion frozen
    */
   update(deltaTime, playerPosition) {
+    const dt = Math.min(0.1, Math.max(0.0001, deltaTime));
+
+    // ------------------------------------------------------------------
+    // 1. FOCUS POINT: chase the player with frame-rate independent damping,
+    //    then lead the focus into the movement direction (look-ahead) so
+    //    fast dashes keep the hero framed instead of sliding off-screen.
+    // ------------------------------------------------------------------
     if (playerPosition) {
       this.targetPosition.copy(playerPosition);
-      this.targetPosition.y += 1.6; // Focus on player chest / eye height
+      this.targetPosition.y += 1.5; // chest/eye focus
+    }
+
+    // Estimate target velocity from focus motion (deterministic from inputs).
+    // Convert the per-frame delta to per-second velocity BEFORE smoothing so
+    // thresholds (m/s) and look-ahead (m) are frame-rate independent.
+    this._moveDelta.subVectors(this.targetPosition, this._lastTargetPos);
+    this._lastTargetPos.copy(this.targetPosition);
+    this._moveDelta.divideScalar(dt);
+    this._smoothedVel.lerp(this._moveDelta, 1.0 - Math.exp(-dt * 8.0));
+
+    // Look-ahead eases toward clamped velocity direction
+    const speed = Math.sqrt(
+      this._smoothedVel.x * this._smoothedVel.x +
+      this._smoothedVel.z * this._smoothedVel.z
+    );
+    const lead = Math.min(1.0, speed / 16.0) * LOOKAHEAD_MAX;
+    if (speed > 0.0001) {
+      const k = lead / speed;
+      this._tmp.set(this._smoothedVel.x * k, 0, this._smoothedVel.z * k);
+    } else {
+      this._tmp.set(0, 0, 0);
+    }
+    this._lookAhead.lerp(this._tmp, 1.0 - Math.exp(-dt * LOOKAHEAD_RATE));
+
+    this._focus.copy(this.targetPosition).add(this._lookAhead);
+
+    // ------------------------------------------------------------------
+    // 2. AUTO-FOLLOW: when enabled and the user has not orbited recently,
+    //    ease the yaw so the rig settles back BEHIND the movement arc.
+    //    Rate-limited + shortest-path: even a 180° correction is a smooth
+    //    ~2s drift, never a whip cut.
+    // ------------------------------------------------------------------
+    this._manualOrbitTimer -= dt;
+    if (this.autoFollow && this._manualOrbitTimer <= 0 && speed > 2.5) {
+      const inv = 1 / speed;
+      const dirX = this._smoothedVel.x * inv;
+      const dirZ = this._smoothedVel.z * inv;
+      // Camera offset dir is (-moveDir): yaw such that rig sits opposite motion
+      const desiredYaw = Math.atan2(-dirX, -dirZ);
+      let dy = desiredYaw - this.targetYaw;
+      while (dy > Math.PI) dy -= Math.PI * 2;
+      while (dy < -Math.PI) dy += Math.PI * 2;
+      const step = Math.max(-this._followYawRate * dt, Math.min(this._followYawRate * dt, dy));
+      this.targetYaw += step;
     }
 
     // Poll Gamepad for Console / TV
     this.pollGamepad();
 
-    // Smooth camera damping
-    const lerpSpeed = Math.min(1.0, deltaTime * 12.0);
-    this.smoothedTarget.lerp(this.targetPosition, lerpSpeed);
-    this.currentZoom += (this.targetZoom - this.currentZoom) * lerpSpeed;
-    this.currentPitch += (this.targetPitch - this.currentPitch) * lerpSpeed;
-    this.currentYaw += (this.targetYaw - this.currentYaw) * lerpSpeed;
+    // ------------------------------------------------------------------
+    // 3. EXP-DAMPED SMOOTHING (identical behavior at any framerate)
+    // ------------------------------------------------------------------
+    const fFollow = 1.0 - Math.exp(-dt * FOLLOW_RATE);
+    const fZoom = 1.0 - Math.exp(-dt * ZOOM_RATE);
+    const fRot = 1.0 - Math.exp(-dt * ROT_RATE);
+    this.smoothedTarget.lerp(this._focus, fFollow);
+    this.currentZoom += (this.targetZoom - this.currentZoom) * fZoom;
+    this.currentPitch += (this.targetPitch - this.currentPitch) * fRot;
+    this.currentYaw += (this.targetYaw - this.currentYaw) * fRot;
 
-    // Spherical coordinate offset calculation for base camera position
+    // ------------------------------------------------------------------
+    // 4. BASE POSE: spherical offset behind & above the focus point.
+    // ------------------------------------------------------------------
     const cosPitch = Math.cos(this.currentPitch);
     const sinPitch = Math.sin(this.currentPitch);
     const cosYaw = Math.cos(this.currentYaw);

@@ -134,25 +134,107 @@ ok('Spawned all 7 explosion types + full weather suite');
   ok(`GPU volumetric cloud: ${weather.activeClouds.length} clouds = ${weather.activeClouds.length} draw calls (0 sprite billboards)`);
 }
 
-// Round 8: precipitation must be VISIBLE - textured drop Points per shaft,
-// buffer synced with the falling drops each frame
+// Rework v4: precipitation is GPU-simulated - drop motion lives in the
+// vertex shader (uTime), so the CPU cost per shaft per frame is ~4 uniform
+// writes and zero buffer uploads.
 {
   const shaft = weather.createRainshaft(new THREE.Vector3(0, 0, 0), 100, 120, 400);
   if (!(shaft.drops instanceof THREE.Points)) throw new Error('rainshaft has no precipitation Points');
-  if (!shaft.drops.geometry.attributes.position) throw new Error('precipitation buffer missing');
-  if (!shaft.dropMat.map) throw new Error('precipitation Points have no streak texture');
-  // sync the buffer, then snapshot drop y-positions and confirm they fall
+  if (!shaft.drops.geometry.attributes.position) throw new Error('precipitation seed buffer missing');
+  if (!shaft.drops.geometry.attributes.aSpeed) throw new Error('GPU rain missing aSpeed attribute');
+  if (!shaft.drops.geometry.attributes.aSeed) throw new Error('GPU rain missing aSeed attribute');
+  if (!shaft.dropMat.uniforms || !shaft.dropMat.uniforms.uMap) throw new Error('precipitation shader has no streak texture');
+  if (shaft.dropMat.uniforms.uMap.value.type !== 'Texture' && !(shaft.dropMat.uniforms.uMap.value.isTexture)) {
+    throw new Error('uMap is not a texture');
+  }
+  // Advance simulated time and confirm the shader clock actually runs
   weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
-  const i3 = 5 * 3;
-  const y0 = shaft.dropPos[i3 + 1];
-  for (let i = 0; i < 20; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
-  const y1 = shaft.dropPos[i3 + 1];
-  if (y1 >= y0) throw new Error(`precipitation not falling (y ${y0} -> ${y1})`);
-  if (shaft.dropMat.opacity <= 0) throw new Error('precipitation fully transparent');
-  ok(`Precipitation Points live: 400 drops falling (${y0.toFixed(1)}m -> ${y1.toFixed(1)}m), streak texture bound`);
+  const t0 = shaft.dropMat.uniforms.uTime.value;
+  for (let i = 0; i < 30; i++) weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+  const t1 = shaft.dropMat.uniforms.uTime.value;
+  if (!(t1 > t0 + 0.4)) throw new Error(`GPU rain clock not advancing (${t0.toFixed(2)} -> ${t1.toFixed(2)})`);
+  if (!(shaft.dropMat.opacity > 0)) throw new Error('precipitation fully transparent');
+  ok(`GPU rain live: 400 shader-driven drops (sim clock ${t0.toFixed(2)} -> ${t1.toFixed(2)}s, streak texture bound, 0 buffer uploads)`);
   // Let the shaft expire to keep the scene tidy
   shaft.duration = 0.01;
   weather.update(1 / 60, enemies.enemies, new THREE.Vector3(0, 0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// REWORK: camera default pose must be BEHIND-TOP the player
+// ---------------------------------------------------------------------------
+console.log('\n[Camera rig spec test]');
+{
+  const cam2 = new THREE.PerspectiveCamera(62, 16 / 9, 0.2, 1200);
+  const rig = new CameraController(cam2, null);
+  const p = new THREE.Vector3(0, 0, 0); // player faces -Z at yaw 0
+  rig.update(1 / 60, p);
+  rig.update(1 / 60, p);
+  rig.update(1 / 60, p);
+  const horizontalBehind = cam2.position.z; // camera should sit at +Z (behind)
+  const heightAbove = cam2.position.y;
+  if (!(horizontalBehind > 8)) throw new Error(`camera not BEHIND the player (z=${horizontalBehind.toFixed(2)})`);
+  if (!(heightAbove > 6)) throw new Error(`camera not ABOVE the player (y=${heightAbove.toFixed(2)})`);
+  // Camera must look DOWN at the player (behind-top framing)
+  const dir = new THREE.Vector3();
+  cam2.getWorldDirection(dir);
+  if (!(dir.y < -0.4)) throw new Error(`camera not looking down (dir.y=${dir.y.toFixed(2)})`);
+  ok(`behind-top rig: cam at z=+${horizontalBehind.toFixed(1)}m, y=+${heightAbove.toFixed(1)}m, looking down ${(Math.asin(-dir.y) * 180 / Math.PI).toFixed(0)}°`);
+
+  // Frame-rate independence: 30Hz and 60Hz updates must converge to the same
+  // resting pose (exponential damping), unlike the old min(1, dt*k) lerps.
+  // (auto-follow is disabled for the twins: it is deliberately a per-frame
+  //  rate-limited game-feel layer, not part of the damping guarantee)
+  const camA = new THREE.PerspectiveCamera(62, 16 / 9, 0.2, 1200);
+  const camB = new THREE.PerspectiveCamera(62, 16 / 9, 0.2, 1200);
+  const rigA = new CameraController(camA, null);
+  const rigB = new CameraController(camB, null);
+  rigA.autoFollow = false;
+  rigB.autoFollow = false;
+  const pFar = new THREE.Vector3(50, 0, -40);
+  for (let i = 0; i < 60; i++) rigA.update(1 / 30, pFar); // 2 seconds @ 30fps
+  for (let i = 0; i < 120; i++) rigB.update(1 / 60, pFar); // 2 seconds @ 60fps
+  const drift = camA.position.distanceTo(camB.position);
+  if (drift > 0.5) throw new Error(`30Hz vs 60Hz camera poses diverge by ${drift.toFixed(2)}m (framerate-dependent damping)`);
+  ok(`framerate-independent damping: 30Hz vs 60Hz resting poses within ${drift.toFixed(3)}m`);
+
+  // Auto-follow: after a sustained straight run, the rig yaw must settle back
+  // BEHIND the motion direction (camera on the opposite side of the velocity).
+  const camC = new THREE.PerspectiveCamera(62, 16 / 9, 0.2, 1200);
+  const rigC = new CameraController(camC, null);
+  const walker = new THREE.Vector3(0, 0, 0);
+  for (let i = 0; i < 240; i++) { // 4s of running +Z at 16 m/s
+    walker.z += 16 / 60;
+    rigC.update(1 / 60, walker);
+  }
+  const camOffset = new THREE.Vector3().subVectors(camC.position, walker);
+  // Moving +Z => camera must end up at -Z of the player (behind)
+  if (!(camOffset.z < -6)) throw new Error(`auto-follow failed: cam offset z=${camOffset.z.toFixed(2)} (expected behind at -Z)`);
+  ok(`auto-follow settled behind the run direction (offset z=${camOffset.z.toFixed(1)}m)`);
+}
+
+// ---------------------------------------------------------------------------
+// REWORK: dash must cover EXACTLY the requested distance
+// ---------------------------------------------------------------------------
+console.log('\n[Dash accuracy test]');
+{
+  const p2 = new Player(scene, sound);
+  p2.position.set(0, 0, 0);
+  p2.group.rotation.y = 0; // faces -Z
+  p2.triggerDash(12.0);
+  for (let i = 0; i < 60; i++) p2.update(1 / 60, camera);
+  const moved = -p2.position.z; // forward is -Z
+  if (Math.abs(moved - 12.0) > 0.35) throw new Error(`dash covered ${moved.toFixed(2)}m, expected 12.0m`);
+  ok(`dash distance exact: requested 12.0m, traveled ${moved.toFixed(2)}m`);
+
+  // Speed-parameterized variant: (10m @ 240 m/s) must cover exactly 10m
+  p2.position.set(0, 0, 0);
+  p2.dashCooldown = 0;
+  p2.triggerDash(10.0, 240.0);
+  for (let i = 0; i < 60; i++) p2.update(1 / 60, camera);
+  const moved2 = -p2.position.z;
+  if (Math.abs(moved2 - 10.0) > 0.35) throw new Error(`skill dash covered ${moved2.toFixed(2)}m, expected 10.0m`);
+  ok(`skill dash (10m @ 240 m/s) exact: traveled ${moved2.toFixed(2)}m`);
 }
 
 // Round 7: hail physics + shatter damage + expiry

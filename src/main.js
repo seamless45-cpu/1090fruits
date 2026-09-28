@@ -23,6 +23,14 @@ import { formatNumber } from './utils.js';
 const _gunTarget = new THREE.Vector3();
 const _gunWeapon = new THREE.Vector3();
 
+// Pre-allocated scratch + tuned constants for the M1 melee cone test
+// (zero per-swing allocations on the hottest combat path).
+const _m1Forward = new THREE.Vector3();
+const _m1ToEnemy = new THREE.Vector3();
+const M1_RANGE = 5.0;        // meters of reach from the swing center
+const M1_HALF_ANGLE = 0.9;   // ~103° full arc in front of the operative
+const M1_COS = Math.cos(M1_HALF_ANGLE);
+
 /**
  * 3D 1090 Fruits - Core Game Engine
  *
@@ -43,9 +51,14 @@ export class GameEngine {
     this.scene.fog.densityBase = 0.0011;
     this.scene.fog.colorStorm = new THREE.Color(0x151b28);
 
+    // Adaptive resolution governor state (continuous 55%-100% scaling)
+    this._govScale = 1.0;
+    this.userResScale = 1.0;
+
     const aspect = window.innerWidth / window.innerHeight;
-    // Round 8: cinematic wide FOV + long far plane for the big sky
-    this.camera = new THREE.PerspectiveCamera(70, aspect, 0.2, 1800);
+    // Rework: 62° vertical FOV - natural perspective for the behind-top rig
+    // (70° distorted models at 14m and wasted GPU fill at the edges).
+    this.camera = new THREE.PerspectiveCamera(62, aspect, 0.2, 1800);
     window.__activeCamera = this.camera;
 
     this.renderer = new THREE.WebGLRenderer({
@@ -53,9 +66,16 @@ export class GameEngine {
       powerPreference: 'high-performance'
     });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
+    // PERF: 1.75 device-pixel cap. Past ~1.75x the retina tax dominates:
+    // fill cost grows quadratically while perceived sharpness stops improving.
+    this.maxPixelRatio = 1.75;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.maxPixelRatio));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // PERF: shadow maps re-render only at 30Hz (see _shadowTimer in animate),
+    // not once per frame. Halves the shadow pass cost; motion is unaffected.
+    this.renderer.shadowMap.autoUpdate = false;
+    this._shadowTimer = 0;
 
     // Cinematic tone mapping (applied by OutputPass at the end of the composer)
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -72,9 +92,9 @@ export class GameEngine {
 
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2)),
-      1.15,   // strength
-      0.55,   // radius
-      0.72    // threshold
+      1.0,    // strength (balanced: strong enough for neon, not washing out)
+      0.5,    // radius
+      0.78    // threshold (only true emissives bloom => cheaper + cleaner)
     );
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(new OutputPass());
@@ -156,8 +176,7 @@ export class GameEngine {
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.composer.setSize(window.innerWidth, window.innerHeight);
+      this._applyEffectivePR();
     });
 
     // Track mouse position for floor raycast
@@ -274,8 +293,24 @@ export class GameEngine {
   }
 
   setResolutionScale(scale) {
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio * scale, 2.5));
-    this.composer.setPixelRatio(Math.min(window.devicePixelRatio * scale, 2.5));
+    // User render scale (0.5 - 1.5 from Graphics settings). The adaptive
+    // governor multiplies on top of this for dynamic load control.
+    this.userResScale = Math.max(0.5, Math.min(1.5, scale));
+    this._applyEffectivePR();
+  }
+
+  /**
+   * Effective pixel ratio = device cap x user scale x governor scale.
+   * Single place where the final render resolution is decided.
+   */
+  _applyEffectivePR() {
+    const base = Math.min(window.devicePixelRatio, this.maxPixelRatio);
+    const pr = Math.max(0.5, base * (this.userResScale || 1.0) * (this._govScale || 1.0));
+    this.renderer.setPixelRatio(pr);
+    this.composer.setPixelRatio(pr);
+    // Match the window-resize handler exactly
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.composer.setSize(window.innerWidth, window.innerHeight);
   }
 
   equipFruit(fruitId) {
@@ -600,9 +635,22 @@ export class GameEngine {
   }
 
   spawnFirepit(centerPos, radius = 25.0, duration = 10.0, tickPct = 0.03) {
-    // Layered firepit: hot core + flickering outer glow + rising ember column
-    const coreGeo = new THREE.CircleGeometry(radius * 0.75, 32);
-    coreGeo.rotateX(-Math.PI / 2);
+    // Layered firepit: hot core + flickering outer glow + rising ember column.
+    // PERF: geometries are cached per-radius and disposed on expiry (the old
+    // version leaked GPU buffers every cast).
+    const key = Math.round(radius * 10);
+    let cached = this._firepitGeoCache && this._firepitGeoCache.get(key);
+    if (!cached) {
+      if (!this._firepitGeoCache) this._firepitGeoCache = new Map();
+      const coreGeo = new THREE.CircleGeometry(radius * 0.75, 32);
+      coreGeo.rotateX(-Math.PI / 2);
+      const ringGeo = new THREE.RingGeometry(radius * 0.78, radius, 40);
+      ringGeo.rotateX(-Math.PI / 2);
+      cached = { coreGeo, ringGeo, refs: 0 };
+      this._firepitGeoCache.set(key, cached);
+    }
+    cached.refs++;
+    const coreGeo = cached.coreGeo;
     const coreMat = new THREE.MeshBasicMaterial({
       color: 0xff7722, transparent: true, opacity: 0.7,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
@@ -612,8 +660,7 @@ export class GameEngine {
     core.position.y = 0.12;
     this.scene.add(core);
 
-    const geo = new THREE.RingGeometry(radius * 0.78, radius, 40);
-    geo.rotateX(-Math.PI / 2);
+    const geo = cached.ringGeo;
     const mat = new THREE.MeshBasicMaterial({
       color: 0xff3300, transparent: true, opacity: 0.5,
       side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
@@ -640,7 +687,8 @@ export class GameEngine {
       elapsed: 0,
       tickPct,
       tickTimer: 0,
-      mat
+      mat,
+      geoCache: cached
     });
   }
 
@@ -663,7 +711,10 @@ export class GameEngine {
   }
 
   /**
-   * M1 Melee Attack logic for equipped weapons
+   * M1 Melee Attack logic for equipped weapons.
+   * ACCURACY: hits are a true directional cone (range + facing arc) rather
+   * than an omni-directional sphere - enemies behind the operative are no
+   * longer clipped by a forward swing. Zero allocations per swing.
    */
   handleM1Attack() {
     if (!this.inGame) return; // ignore clicks behind the loading screen
@@ -671,8 +722,10 @@ export class GameEngine {
     if (!didSwing) return;
 
     const sword = this.equippedSword;
-    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.player.group.rotation.y);
-    const hitCenter = this.player.position.clone().addScaledVector(forward, 3.5);
+    const playerYaw = this.player.group.rotation.y;
+    // Forward on the ground plane from the body yaw (sin/cos, no matrix ops)
+    _m1Forward.set(-Math.sin(playerYaw), 0, -Math.cos(playerYaw));
+    const hitCenter = this.player.position.clone().addScaledVector(_m1Forward, 3.5);
 
     // Charge gravity blade upon attack
     if (sword === 'gravity_blade') {
@@ -704,13 +757,21 @@ export class GameEngine {
       }
     }
 
-    // Hit enemies in front (bare-fist strikes when no sword equipped)
+    // Hit enemies in the forward cone (bare-fist strikes when no sword equipped)
     const bareFist = (sword === 'none');
-    const hitEnemies = this.enemies.getEnemiesInRadius(hitCenter, 5.0);
-    for (const e of hitEnemies) {
+    const reach = M1_RANGE + 3.5; // measured from the operative
+    const list = this.enemies.enemies;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (e.dead) continue;
+      _m1ToEnemy.subVectors(e.mesh.position, this.player.position);
+      const dist = Math.sqrt(_m1ToEnemy.x * _m1ToEnemy.x + _m1ToEnemy.z * _m1ToEnemy.z);
+      if (dist > reach) continue;
+      // Facing cone: enemy must be in FRONT of the swing arc
+      if (dist > 0.5 && (_m1ToEnemy.x * _m1Forward.x + _m1ToEnemy.z * _m1Forward.z) / dist < M1_COS) continue;
       const dmg = (bareFist ? 250 : 350) + this.player.comboStep * 80;
       e.takeDamage(dmg, this.player.comboStep === 3, 'sword');
-      e.applyKnockback(forward, 12.0);
+      e.applyKnockback(_m1Forward, 12.0);
     }
   }
 
@@ -909,63 +970,34 @@ export class GameEngine {
   }
 
   // =================================================================
-  // ADAPTIVE QUALITY GOVERNOR (Round 7)
-  // "Performance issues still persist" => a runtime governor that steps
-  // render cost up and down to hold frame time. It watches the render
-  // stage of each frame (EMA-smoothed) and, on a slow 1.2s cadence,
-  // moves through quality tiers:
-  //     T0  full      : max pixel ratio, 1024 shadow, bloom on
-  //     T1  high      : pixel ratio * 0.8
-  //     T2  medium    : pixel ratio * 0.62, 512 shadow
-  //     T3  low       : pixel ratio * 0.5,  512 shadow, bloom off
-  // It eases back up when headroom returns, so a good GPU stays at T0.
+  // ADAPTIVE RESOLUTION GOVERNOR (Rework v4)
+  // The old tier system stepped resolution in 4 coarse jumps, which was
+  // visible as sudden quality pops. The reworked governor scales
+  // CONTINUOUSLY between 55% and 100%:
+  //   - watches an EMA of the real frame delta (what the player feels,
+  //     not just the render section)
+  //   - every 0.9 s: too slow -> scale x0.88, headroom -> scale x1.06
+  //   - hysteresis band (20.5ms down / 13.8ms up) prevents oscillation
+  //   - never touches the user's shadow/bloom settings
   // =================================================================
-  _qgApply(tier) {
-    if (tier === this._qgTier) return;
-    this._qgTier = tier;
-    const basePR = Math.min(window.devicePixelRatio, 2.0);
-    const prFactor = [1.0, 0.8, 0.62, 0.5][tier];
-    const pr = Math.max(0.75, basePR * prFactor);
-    this.renderer.setPixelRatio(pr);
-    this.composer.setPixelRatio(pr);
-    // Match the window-resize handler exactly
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.composer.setSize(window.innerWidth, window.innerHeight);
-
-    // Shadows: never touch them at the top two tiers (the user's explicit
-    // settings-modal choice stands); under load, clamp to 512. Respect OFF.
-    const userShadow = this.arena.userShadowSize || 1024;
-    const shadowSize = this.arena.dirLight.castShadow
-      ? Math.min(userShadow, tier >= 2 ? 512 : userShadow)
-      : 0;
-    const dl = this.arena.dirLight;
-    if (dl && dl.shadow && shadowSize > 0) {
-      if (dl.shadow.mapSize.x !== shadowSize) {
-        dl.shadow.mapSize.set(shadowSize, shadowSize);
-        if (dl.shadow.map) { dl.shadow.map.dispose(); dl.shadow.map = null; }
-      }
-    }
-    // Bloom is the priciest pass; kill it only on the lowest tier - and
-    // only the governor may switch it back on (the user's toggle stands).
-    if (tier >= 3 && this.bloomPass.enabled) {
-      this._qgBloomWasOn = true;
-      this.bloomPass.enabled = false;
-    } else if (tier < 3 && this._qgBloomWasOn) {
-      this._qgBloomWasOn = false;
-      this.bloomPass.enabled = true;
-    }
-    this._qgLog = `T${tier} · ${pr.toFixed(2)}x · shadow ${shadowSize} · bloom ${this.bloomPass.enabled ? 'on' : 'off'}`;
+  _govApply() {
+    this._applyEffectivePR();
+    this._govLog = `R-${Math.round((this.userResScale || 1.0) * this._govScale * 100)}%`;
   }
 
-  _qgUpdate(renderMs, dt) {
-    if (!this._qgTier) this._qgTier = 0;
-    // Exponential moving average of render time
-    this._qgEma = this._qgEma != null ? this._qgEma * 0.9 + renderMs * 0.1 : renderMs;
-    this._qgTimer = (this._qgTimer || 0) + dt;
-    if (this._qgTimer < 1.2) return;
-    this._qgTimer = 0;
-    if (this._qgEma > 22 && this._qgTier < 3) this._qgApply(this._qgTier + 1);
-    else if (this._qgEma < 12 && this._qgTier > 0) this._qgApply(this._qgTier - 1);
+  _govUpdate(frameMs, dt) {
+    // EMA of the whole frame time (rAF delta), not just the render section
+    this._govEma = this._govEma != null ? this._govEma * 0.92 + frameMs * 0.08 : frameMs;
+    this._govTimer = (this._govTimer || 0) + dt;
+    if (this._govTimer < 0.9) return;
+    this._govTimer = 0;
+    if (this._govEma > 20.5 && this._govScale > 0.55) {
+      this._govScale = Math.max(0.55, this._govScale * 0.88);
+      this._govApply();
+    } else if (this._govEma < 13.8 && this._govScale < 1.0) {
+      this._govScale = Math.min(1.0, this._govScale * 1.06);
+      this._govApply();
+    }
   }
 
   animate() {
@@ -1044,6 +1076,15 @@ export class GameEngine {
         this.scene.remove(h.light);
         h.mat.dispose();
         h.coreMat.dispose();
+        // Release the cached geometry reference (disposed when last user ends)
+        if (h.geoCache) {
+          h.geoCache.refs--;
+          if (h.geoCache.refs <= 0) {
+            h.geoCache.coreGeo.dispose();
+            h.geoCache.ringGeo.dispose();
+            this._firepitGeoCache.delete(Math.round(h.radius * 10));
+          }
+        }
         this.activeHazards.splice(i, 1);
         continue;
       }
@@ -1081,12 +1122,23 @@ export class GameEngine {
     this.updateHUDValues(dt);
 
     // 8. Render Scene (through the bloom composer)
+    // PERF: shadow maps refresh at 30Hz instead of every frame. The sun is
+    // static and characters move smoothly; 30Hz shadow motion is invisible
+    // in practice and halves one of the most expensive passes.
+    this._shadowTimer += dt;
+    if (this._shadowTimer >= 1 / 30) {
+      this._shadowTimer = 0;
+      if (this.arena.dirLight.castShadow) {
+        this.renderer.shadowMap.needsUpdate = true;
+      }
+    }
     this.composer.render();
 
     const renderMs = performance.now() - startTime;
 
-    // Round 7: adaptive quality governor keeps frame time in budget
-    this._qgUpdate(renderMs, dt);
+    // Rework v4: continuous adaptive resolution governor keeps the frame
+    // budget (measured on the real rAF delta, what the player feels).
+    this._govUpdate(dt * 1000, dt);
 
     // Telemetry & FPS Stats
     this.frameCount++;
@@ -1099,7 +1151,7 @@ export class GameEngine {
       const debrisCount = this.explosions.getActiveDebrisCount();
       const lightningCount = this.lightning.getActiveCount();
       this.settingsModal.updateStats(this.currentFps, renderMs, debrisCount, debrisCount * 2, lightningCount,
-        this._qgTier > 0 ? ` · Q-${this._qgTier}` : '');
+        this._govScale < 1.0 ? ` · ${this._govLog || ''}` : '');
     }
   }
 }

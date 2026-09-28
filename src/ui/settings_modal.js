@@ -36,6 +36,8 @@ export class SettingsModal {
     this.viewDistSlider = document.getElementById('opt-view-dist');
     this.valViewDist = document.getElementById('val-view-dist');
 
+    this.cameraFollowCheckbox = document.getElementById('opt-camera-follow');
+
     // Preset buttons
     this.presetBtns = document.querySelectorAll('.preset-btn');
 
@@ -46,6 +48,10 @@ export class SettingsModal {
     if (this.modal) {
       this.modal.style.display = 'flex';
       this.game.sound.playUiOpen();
+    }
+    // Reflect live camera state in the form
+    if (this.cameraFollowCheckbox && this.game.cameraController) {
+      this.cameraFollowCheckbox.checked = this.game.cameraController.autoFollow !== false;
     }
   }
 
@@ -202,6 +208,11 @@ export class SettingsModal {
     const viewDist = parseFloat(this.viewDistSlider.value);
     this.game.camera.far = viewDist;
     this.game.camera.updateProjectionMatrix();
+
+    // 6b. Camera auto-follow (behind-top rig behavior)
+    if (this.cameraFollowCheckbox && this.game.cameraController) {
+      this.game.cameraController.autoFollow = this.cameraFollowCheckbox.checked;
+    }
 
     // 7. Bloom post-processing (neon glow)
     if (this.game.bloomPass) {

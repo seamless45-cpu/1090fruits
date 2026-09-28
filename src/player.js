@@ -16,6 +16,20 @@ import * as THREE from 'three';
 // Pre-allocated shared unit vectors (pre-method: avoid per-frame allocs)
 const _V3_UP = new THREE.Vector3(0, 1, 0);
 
+// ---------------------------------------------------------------------------
+// PHYSICS CONSTANTS (single source of truth - "accurate calculations")
+// ---------------------------------------------------------------------------
+const GRAVITY = 24.0;          // m/s² game gravity (heavy, readable arcs)
+const JUMP_VELOCITY = 11.0;    // m/s  => apex = v²/2g = 2.52 m, airtime 0.92 s
+const DASH_DURATION = 0.16;    // s    default dash window
+const REGEN_HP_PER_S = 15.0;   // passive regen
+
+// Pre-allocated scratch for combat/anim hot paths (no per-call allocations)
+const _slashFwd = new THREE.Vector3();
+const _slashPos = new THREE.Vector3();
+const _slashLook = new THREE.Vector3();
+const _dashFwd = new THREE.Vector3();
+
 const FRUIT_COLORS = {
   gravity: 0xb026ff,
   lightning: 0x00f0ff,
@@ -135,9 +149,12 @@ export class Player {
 
     t.mesh.position.copy(worldPos);
     // Arc plane contains (forward, up): point local +Z along the right vector
-    const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.group.rotation.y);
-    const look = new THREE.Vector3(worldPos.x + right.x, worldPos.y, worldPos.z + right.z);
-    t.mesh.lookAt(look);
+    _slashLook.set(
+      worldPos.x + Math.cos(this.group.rotation.y),
+      worldPos.y,
+      worldPos.z - Math.sin(this.group.rotation.y)
+    );
+    t.mesh.lookAt(_slashLook);
     t.mesh.rotateZ(Math.random() * 1.2 - 0.6 + (Math.random() < 0.5 ? Math.PI : 0));
 
     t.mat.color.copy(this.auraMat.color);
@@ -430,6 +447,46 @@ export class Player {
     this.auraRing2.rotation.y = Math.PI / 3;
     this.bodyGroup.add(this.auraRing2);
 
+    // ---------- Fresnel rim-light shell ----------
+    // A single additive shell hugging the torso silhouettes the hero with a
+    // fruit-colored edge glow (reads at any distance, costs 1 draw call).
+    this.rimMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      uniforms: {
+        uColor: { value: new THREE.Color(0x00f0ff) },
+        uPower: { value: 2.6 },
+        uStrength: { value: 0.85 },
+      },
+      vertexShader: /* glsl */`
+        varying vec3 vNormal;
+        varying vec3 vView;
+        void main() {
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vNormal = normalize(normalMatrix * normal);
+          vView = normalize(-mv.xyz);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        uniform vec3 uColor;
+        uniform float uPower;
+        uniform float uStrength;
+        varying vec3 vNormal;
+        varying vec3 vView;
+        void main() {
+          float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vView))), uPower);
+          gl_FragColor = vec4(uColor, fres * uStrength);
+        }`,
+    });
+    this.rimShell = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.46, 1.05, 6, 20),
+      this.rimMat
+    );
+    this.rimShell.position.y = 1.35;
+    this.bodyGroup.add(this.rimShell);
+
     // Soft halo under the feet (fruit colored)
     const haloCv = document.createElement('canvas');
     haloCv.width = 64;
@@ -693,6 +750,7 @@ export class Player {
     this.haloMat.color.setHex(c);
     this.crestMat.color.setHex(c);
     this.dashSpriteMat.color.setHex(c);
+    if (this.rimMat) this.rimMat.uniforms.uColor.value.setHex(c);
     for (const a of this.afterimages) a.mat.color.setHex(c);
   }
 
@@ -709,14 +767,30 @@ export class Player {
     });
   }
 
-  triggerDash(customDist = 12.0, customSpeed = 60.0) {
+  /**
+   * Dash. ACCURACY FIX: the dash now covers EXACTLY `distance` meters.
+   * The old version accepted (distance, speed) but moved at speed*0.16s
+   * regardless of distance (a 60 m/s dash covered 9.6 m, not the stated
+   * 12 m; a 240 m/s skill dash overshot to 38 m). The travel window adapts
+   * so that distance = speed x duration always holds.
+   * @param {number} distance - exact ground distance to cover (meters)
+   * @param {number|null} speed - optional launch speed (m/s); duration adapts
+   */
+  triggerDash(distance = 12.0, speed = null) {
     if (this.dashCooldown > 0) return;
     this.dashCooldown = 0.5;
 
-    // Dash in forward direction or movement vector
-    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(_V3_UP, this.group.rotation.y);
-    this.dashVelocity.copy(forward).multiplyScalar(customSpeed);
-    this.dashTimer = 0.16;
+    // Dash along the body's forward direction (local -Z rotated by yaw)
+    _dashFwd.set(-Math.sin(this.group.rotation.y), 0, -Math.cos(this.group.rotation.y));
+
+    let duration = DASH_DURATION;
+    if (speed && speed > 0) {
+      duration = Math.max(0.06, Math.min(0.3, distance / speed));
+    }
+    const velocity = distance / duration; // exact distance guarantee
+
+    this.dashVelocity.copy(_dashFwd).multiplyScalar(velocity);
+    this.dashTimer = duration;
     this.thrusterMat.color.setHex(0x88eeff);
 
     this.sound.playDash();
@@ -812,10 +886,10 @@ export class Player {
     this.sound.playSlash(1.0 + this.comboStep * 0.2);
 
     // Energy arc sweeping the hit zone in front of the operative
-    const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(_V3_UP, this.group.rotation.y);
-    const hitPos = this.position.clone().addScaledVector(forward, 3.2);
-    hitPos.y = 1.4;
-    this.spawnSlashTrail(hitPos);
+    _slashFwd.set(-Math.sin(this.group.rotation.y), 0, -Math.cos(this.group.rotation.y));
+    _slashPos.copy(this.position).addScaledVector(_slashFwd, 3.2);
+    _slashPos.y = 1.4;
+    this.spawnSlashTrail(_slashPos);
 
     return true;
   }
@@ -873,25 +947,28 @@ export class Player {
       this.group.rotation.y = targetAngle;
     }
 
-    // 4. Position update (Movement + Dash)
+    // 4. Position update (Movement + Dash) - exact distances:
+    //    the final dash step is clamped to the remaining window so
+    //    distance = velocity x duration holds at ANY framerate.
     if (this.dashTimer > 0) {
+      const step = Math.min(this.dashTimer, dt);
+      this.position.addScaledVector(this.dashVelocity, step);
       this.dashTimer -= dt;
-      this.position.addScaledVector(this.dashVelocity, dt);
     } else {
       const currentSpeed = this.moveSpeed * (this.buffs.alarmBuffer.active ? 1.25 : 1.0);
       this.position.addScaledVector(moveDir, currentSpeed * dt);
     }
 
-    // Jump / Levitation
+    // Jump / Levitation (semi-implicit Euler: v += g*dt BEFORE x += v*dt)
     if (this.keys['Space']) {
       if (this.isGrounded) {
-        this.velocity.y = 12.0;
+        this.velocity.y = JUMP_VELOCITY;
         this.isGrounded = false;
       }
     }
 
     if (!this.isGrounded) {
-      this.velocity.y -= 28.0 * dt; // Gravity
+      this.velocity.y -= GRAVITY * dt;
       this.position.y += this.velocity.y * dt;
       if (this.position.y <= 0) {
         this.position.y = 0;
@@ -932,6 +1009,8 @@ export class Player {
     const auraPulse = 0.5 + 0.2 * Math.sin(this.animTime * 3.0);
     this.auraMat.opacity = auraPulse;
     this.haloMat.opacity = 0.3 + 0.15 * Math.sin(this.animTime * 3.0);
+    // Fresnel rim breathes with the aura (single uniform write)
+    if (this.rimMat) this.rimMat.uniforms.uStrength.value = 0.7 + 0.25 * Math.sin(this.animTime * 3.0);
 
     // Weapon glow pulse
     if (this.weaponGlowMats) {
@@ -964,7 +1043,8 @@ export class Player {
       }
       this.dashSpriteMat.opacity = 0.9;
     } else {
-      this.dashSpriteMat.opacity *= (1 - Math.min(1, dt * 8));
+      // Frame-rate independent fade (exp decay, not 1-min(1,dt*k))
+      this.dashSpriteMat.opacity *= Math.exp(-dt * 8.0);
       if (this.thrusterMat.color.getHex() === 0x88eeff) {
         this.thrusterMat.color.setHex(0x223344);
       }
@@ -999,7 +1079,7 @@ export class Player {
 
     // Passive HP regen
     if (this.hp < this.maxHp) {
-      this.hp = Math.min(this.maxHp, this.hp + 15 * dt);
+      this.hp = Math.min(this.maxHp, this.hp + REGEN_HP_PER_S * dt);
     }
   }
 
@@ -1031,7 +1111,8 @@ export class Player {
     const bob = this.isMoving && this.isGrounded ? Math.abs(Math.sin(this.walkPhase)) * 0.07 : 0;
     this.bodyGroup.position.y = bob + (air ? 0.05 : 0);
     const targetLean = this.isMoving ? 0.09 : 0.0;
-    this.bodyGroup.rotation.x += (targetLean - this.bodyGroup.rotation.x * 0.5) * Math.min(1, dt * 8);
+    // Frame-rate independent lean easing
+    this.bodyGroup.rotation.x += (targetLean - this.bodyGroup.rotation.x) * (1 - Math.exp(-dt * 8));
 
     // Idle breathing
     if (!this.isMoving && this.isGrounded) {

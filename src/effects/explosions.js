@@ -1149,6 +1149,12 @@ export class ExplosionManager {
     for (const v of this.vortices) { add(v.pts); add(v.ring); add(v.ring2); add(v.pillar); add(v.liftRing); }
     for (const w of this.megaWaves) for (const r of w.set) add(r.mesh);
     for (const b of this.beams) { add(b.mesh); add(b.glow); add(b.pulse); }
+    // CRITICAL: include the pooled flash POINT LIGHTS. three.js compiles a
+    // separate program variant per active-light count; without this, the
+    // first explosion of a session recompiled every standard material
+    // (visible one-frame hitch). Warmed here, the with-lights variant is
+    // compiled during the loading screen instead.
+    for (const fl of this.flashLights) add(fl.light);
 
     const prev = [];
     for (const o of objs) { prev.push(o.visible); o.visible = true; }

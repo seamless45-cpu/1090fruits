@@ -1,16 +1,23 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /**
- * 3D 1090 Fruits - Combat Arena & Environment
+ * 3D 1090 Fruits - Combat Arena & Environment (REWORK v4)
  *
  * A cinematic 1000m sci-fi battleground:
  *  - Procedural gradient sky dome with hash star-field + a distant moon
  *  - Neon metric floor grid (canvas-generated, emissive) with distance rings
- *  - 12 perimeter energy pylons with volumetric light beams & pulsing beacons
+ *  - 12 perimeter energy pylons - merged into 3 draw calls (was ~84 meshes)
+ *  - Distant megastructures - merged into 1 mesh + 1 point cloud (was ~60)
  *  - Central holographic energy core
- *  - Distant megastructure silhouettes for depth
- *  - Drifting atmosphere dust
- *  - Calibrated metric distance rings (10m, 25m, 50m, 100m, 200m, 300m)
+ *  - GPU-animated atmosphere dust (zero CPU per frame)
+ *  - Calibrated metric range rings (10m - 300m), merged into 1 draw call
+ *
+ * REWORK PERFORMANCE NOTES:
+ *  - static world geometry is merged (BufferGeometryUtils) so the whole
+ *    environment costs ~10 draw calls instead of ~150
+ *  - pylon beacon pulses + dust drift run in vertex shaders (uTime only)
+ *  - nothing allocates in update()
  */
 
 // ---------------------------------------------------------------------------
@@ -48,10 +55,14 @@ const SKY_FRAG = /* glsl */`
     vec3 sky = mix(horizon, mid, smoothstep(0.0, 0.22, h));
     sky = mix(sky, zenith, smoothstep(0.18, 0.75, h));
 
-    // Faint storm-band aurora near the horizon
+    // Faint storm-band aurora near the horizon (two incommensurate waves)
     float band = smoothstep(0.02, 0.10, h) * (1.0 - smoothstep(0.10, 0.30, h));
     float wave = sin(d.x * 9.0 + uTime * 0.06) * 0.5 + sin(d.z * 7.0 - uTime * 0.045) * 0.5;
     sky += vec3(0.010, 0.05, 0.075) * band * (0.45 + 0.35 * wave);
+    // Rework: a second, slower aurora sheet higher up for depth
+    float band2 = smoothstep(0.12, 0.24, h) * (1.0 - smoothstep(0.24, 0.48, h));
+    float wave2 = sin(d.x * 4.0 - uTime * 0.03) * sin(d.z * 5.0 + uTime * 0.02);
+    sky += vec3(0.012, 0.028, 0.05) * band2 * (0.5 + 0.5 * wave2);
 
     // Procedural star field (only above horizon)
     if (h > 0.03) {
@@ -287,9 +298,9 @@ export class Arena {
   }
 
   /**
-   * Round 7: live storm lighting. level 0..1 (driven by the weather
-   * manager): a heavy sky over the arena dims the key/hemisphere lights
-   * and thickens the fog, so storms visibly weigh down the whole world.
+   * Live storm lighting. level 0..1 (driven by the weather manager): a
+   * heavy sky over the arena dims the key/hemisphere lights and thickens
+   * the fog, so storms visibly weigh down the whole world.
    */
   setStormLevel(level) {
     // Weather manager ticks at 2Hz - ease toward it per frame so the sky
@@ -336,89 +347,164 @@ export class Arena {
   }
 
   createRings() {
-    // 3D glowing metric range rings floating just above the floor
+    // 3D glowing metric range rings: all SIX merged into ONE vertex-colored
+    // mesh (was 6 draw calls with per-ring material clones).
     const ringRanges = [10, 25, 50, 100, 200, 300];
     const ringColors = [0x00f0ff, 0x00ff88, 0xffaa00, 0xb026ff, 0x00d0ff, 0xff2a55];
-    this.rings = [];
 
-    ringRanges.forEach((radius, idx) => {
-      const ringGeo = new THREE.TorusGeometry(radius, 0.18, 8, 160);
-      ringGeo.rotateX(Math.PI / 2);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: ringColors[idx % ringColors.length],
-        transparent: true,
-        opacity: 0.4,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-      ringMesh.position.y = 0.25;
-      this.scene.add(ringMesh);
-      this.rings.push({ mesh: ringMesh, mat: ringMat, baseOpacity: 0.4, phase: idx * 1.1 });
+    const parts = [];
+    const color = new THREE.Color();
+    for (let idx = 0; idx < ringRanges.length; idx++) {
+      const g = new THREE.TorusGeometry(ringRanges[idx], 0.18, 8, 96);
+      g.rotateX(Math.PI / 2);
+      // Bake the ring color into a per-vertex color attribute
+      color.setHex(ringColors[idx % ringColors.length]);
+      const count = g.attributes.position.count;
+      const cols = new Float32Array(count * 3);
+      for (let v = 0; v < count; v++) {
+        cols[v * 3] = color.r;
+        cols[v * 3 + 1] = color.g;
+        cols[v * 3 + 2] = color.b;
+      }
+      g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+      parts.push(g);
+    }
+
+    const merged = mergeGeometries(parts, false);
+    for (const p of parts) p.dispose();
+
+    this.ringMat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.4,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
     });
+    this.ringMesh = new THREE.Mesh(merged, this.ringMat);
+    this.ringMesh.position.y = 0.25;
+    this.scene.add(this.ringMesh);
   }
 
   createPylons() {
-    this.pylonBeacons = [];
-    this.pylonBeams = [];
-
+    // 12 perimeter pylons, MERGED: the old build created 12 Groups with
+    // ~7 meshes each (~84 draw calls). The rework bakes every pylon into:
+    //   1 dark structure mesh + 1 emissive strip mesh (static, merged)
+    //   1 point cloud for the pulsing beacons (shader-animated)
+    //   1 merged volumetric beam cylinder mesh
+    // => 4 draw calls total for the entire pylon ring.
     const pylonCount = 12;
     const pylonRadius = 380;
 
     const bodyGeo = new THREE.CylinderGeometry(5, 9, 78, 6);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0d1727, roughness: 0.35, metalness: 0.85 });
     const capGeo = new THREE.CylinderGeometry(7.5, 5, 4, 6);
     const stripGeo = new THREE.BoxGeometry(0.7, 60, 0.7);
-    const stripMat = new THREE.MeshStandardMaterial({
-      color: 0x062030, emissive: 0x00c8ff, emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.6
-    });
-    const beaconGeo = new THREE.SphereGeometry(3.2, 16, 16);
     const beamGeo = new THREE.CylinderGeometry(2.2, 3.4, 220, 12, 1, true);
-    const beamMat = new THREE.MeshBasicMaterial({
-      color: 0x00d8ff, transparent: true, opacity: 0.07, side: THREE.DoubleSide,
-      depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
-    });
+
+    const structParts = [];
+    const stripParts = [];
+    const beamParts = [];
+    const beaconPos = new Float32Array(pylonCount * 3);
+    const beaconPhase = new Float32Array(pylonCount);
+
+    const ONE = new THREE.Vector3(1, 1, 1);
+    const groupMat = new THREE.Matrix4();
+    const groupQ = new THREE.Quaternion();
+    const bake = (geo, localY, out) => {
+      const g = geo.clone();
+      g.translate(0, localY, 0);
+      g.applyMatrix4(groupMat);
+      out.push(g);
+    };
 
     for (let i = 0; i < pylonCount; i++) {
       const angle = (i / pylonCount) * Math.PI * 2;
-      const x = Math.cos(angle) * pylonRadius;
-      const z = Math.sin(angle) * pylonRadius;
+      const px = Math.cos(angle) * pylonRadius;
+      const pz = Math.sin(angle) * pylonRadius;
+      // Orient the pylon toward the arena center (as the old lookAt did)
+      const q = groupQ.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -angle + Math.PI / 2);
+      groupMat.compose(new THREE.Vector3(px, 0, pz), q, ONE);
 
-      const group = new THREE.Group();
-      group.position.set(x, 0, z);
-      group.lookAt(0, 0, 0);
-
-      const body = new THREE.Mesh(bodyGeo, bodyMat);
-      body.position.y = 39;
-      body.castShadow = true;
-      body.receiveShadow = true;
-      group.add(body);
-
-      const cap = new THREE.Mesh(capGeo, bodyMat);
-      cap.position.y = 79;
-      group.add(cap);
+      bake(bodyGeo, 39, structParts);
+      bake(capGeo, 79, structParts);
 
       // Three glowing vertical strips around the hexagon
       for (let s = 0; s < 3; s++) {
         const sa = (s / 3) * Math.PI * 2 + Math.PI / 6;
-        const strip = new THREE.Mesh(stripGeo, stripMat);
-        strip.position.set(Math.cos(sa) * 5.6, 38, Math.sin(sa) * 5.6);
-        group.add(strip);
+        const g = stripGeo.clone();
+        g.translate(Math.cos(sa) * 5.6, 38, Math.sin(sa) * 5.6);
+        g.applyMatrix4(groupMat);
+        stripParts.push(g);
       }
 
-      const beaconMat = new THREE.MeshBasicMaterial({ color: 0x9ff4ff });
-      const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-      beacon.position.y = 84;
-      group.add(beacon);
-      this.pylonBeacons.push({ mesh: beacon, mat: beaconMat, phase: i * 0.7 });
+      bake(beamGeo, 78 + 110, beamParts);
 
-      const beam = new THREE.Mesh(beamGeo, beamMat.clone());
-      beam.position.y = 78 + 110;
-      group.add(beam);
-      this.pylonBeams.push({ mesh: beam, mat: beam.material, phase: i * 1.3 });
-
-      this.scene.add(group);
+      beaconPos[i * 3] = px;
+      beaconPos[i * 3 + 1] = 84;
+      beaconPos[i * 3 + 2] = pz;
+      beaconPhase[i] = i * 0.7;
     }
+
+    // 1. Dark structure (bodies + caps)
+    const structMerged = mergeGeometries(structParts, false);
+    structParts.forEach(g => g.dispose());
+    bodyGeo.dispose(); capGeo.dispose();
+    const structMat = new THREE.MeshStandardMaterial({ color: 0x0d1727, roughness: 0.35, metalness: 0.85 });
+    this.pylonStruct = new THREE.Mesh(structMerged, structMat);
+    this.pylonStruct.castShadow = true;
+    this.scene.add(this.pylonStruct);
+
+    // 2. Emissive strips (basic material, baked cyan)
+    const stripMerged = mergeGeometries(stripParts, false);
+    stripParts.forEach(g => g.dispose());
+    stripGeo.dispose();
+    const stripMat = new THREE.MeshBasicMaterial({ color: 0x18c8ff, fog: false });
+    this.pylonStrips = new THREE.Mesh(stripMerged, stripMat);
+    this.scene.add(this.pylonStrips);
+
+    // 3. Beacon point cloud with in-shader pulse (zero CPU per frame)
+    const beaconGeo = new THREE.BufferGeometry();
+    beaconGeo.setAttribute('position', new THREE.BufferAttribute(beaconPos, 3));
+    beaconGeo.setAttribute('aPhase', new THREE.BufferAttribute(beaconPhase, 1));
+    this.beaconMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: /* glsl */`
+        attribute float aPhase;
+        uniform float uTime;
+        varying float vPulse;
+        void main() {
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float pulse = 0.85 + 0.35 * sin(uTime * 2.4 + aPhase);
+          vPulse = pulse;
+          gl_PointSize = 10.0 * pulse * (300.0 / max(1.0, -mv.z));
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        varying float vPulse;
+        void main() {
+          vec2 q = gl_PointCoord - 0.5;
+          float d = length(q) * 2.0;
+          float a = smoothstep(1.0, 0.1, d);
+          gl_FragColor = vec4(vec3(0.62, 0.96, 1.0) * vPulse, a * 0.9);
+        }`,
+    });
+    this.pylonBeacons = new THREE.Points(beaconGeo, this.beaconMat);
+    this.pylonBeacons.frustumCulled = false;
+    this.scene.add(this.pylonBeacons);
+
+    // 4. Merged volumetric light beams (single synchronized breathing pulse)
+    const beamMerged = mergeGeometries(beamParts, false);
+    beamParts.forEach(g => g.dispose());
+    beamGeo.dispose();
+    this.beamMat = new THREE.MeshBasicMaterial({
+      color: 0x00d8ff, transparent: true, opacity: 0.07, side: THREE.DoubleSide,
+      depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+    });
+    this.pylonBeams = new THREE.Mesh(beamMerged, this.beamMat);
+    this.scene.add(this.pylonBeams);
   }
 
   createCenterCore() {
@@ -458,11 +544,11 @@ export class Arena {
   }
 
   createDistantTowers() {
-    // Megastructure silhouettes for parallax depth
-    const matDark = new THREE.MeshStandardMaterial({ color: 0x0a121e, roughness: 0.9, metalness: 0.3 });
-    const matEdge = new THREE.MeshBasicMaterial({ color: 0x1c4a66, transparent: true, opacity: 0.35, fog: false });
-
-    const towers = new THREE.Group();
+    // Megastructure silhouettes for parallax depth.
+    // MERGED: 46 boxes + ~15 antenna lights collapse into
+    // 1 mesh + 1 point cloud (was ~60 draw calls).
+    const towers = [];
+    const lightPos = [];
     let seed = 12345;
     const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
 
@@ -473,43 +559,88 @@ export class Arena {
       const h = 30 + rnd() * 150;
       const d = 14 + rnd() * 40;
 
-      const geo = new THREE.BoxGeometry(w, h, d);
-      const t = new THREE.Mesh(geo, matDark);
-      t.position.set(Math.cos(angle) * dist, h / 2 - 1.5, Math.sin(angle) * dist);
-      t.rotation.y = rnd() * Math.PI;
-      towers.add(t);
+      const g = new THREE.BoxGeometry(w, h, d);
+      const m = new THREE.Matrix4()
+        .makeRotationY(rnd() * Math.PI)
+        .setPosition(Math.cos(angle) * dist, h / 2 - 1.5, Math.sin(angle) * dist);
+      g.applyMatrix4(m);
+      towers.push(g);
 
       // Faint antenna light on top of taller towers
       if (h > 110 && rnd() > 0.35) {
-        const light = new THREE.Mesh(new THREE.SphereGeometry(1.1, 6, 6), matEdge.clone());
-        light.material.color.setHex(0xff3355);
-        light.position.set(t.position.x, h - 1.5 + 1.5, t.position.z);
-        towers.add(light);
+        lightPos.push(Math.cos(angle) * dist, h, Math.sin(angle) * dist);
       }
     }
-    this.scene.add(towers);
+
+    const merged = mergeGeometries(towers, false);
+    towers.forEach(g => g.dispose());
+    const matDark = new THREE.MeshStandardMaterial({ color: 0x0a121e, roughness: 0.9, metalness: 0.3 });
+    this.towerMesh = new THREE.Mesh(merged, matDark);
+    this.scene.add(this.towerMesh);
+
+    const lightGeo = new THREE.BufferGeometry();
+    lightGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lightPos), 3));
+    this.towerLightsMat = new THREE.PointsMaterial({
+      color: 0xff3355, size: 3.0, sizeAttenuation: true,
+      transparent: true, opacity: 0.8, depthWrite: false, fog: false,
+    });
+    this.towerLights = new THREE.Points(lightGeo, this.towerLightsMat);
+    this.scene.add(this.towerLights);
   }
 
   createDust() {
+    // GPU atmosphere dust: positions are STATIC; all drift/twinkle happens in
+    // the vertex shader from uTime. Zero CPU work per frame (the old version
+    // rewrote 700 positions on the CPU every frame).
     const count = 700;
     const positions = new Float32Array(count * 3);
-    this.dustSeeds = new Float32Array(count);
+    const seeds = new Float32Array(count);
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2;
       const r = 20 + Math.random() * 320;
       positions[i * 3 + 0] = Math.cos(a) * r;
-      positions[i * 3 + 1] = Math.random() * 40;
+      positions[i * 3 + 1] = Math.random() * 42;
       positions[i * 3 + 2] = Math.sin(a) * r;
-      this.dustSeeds[i] = Math.random() * Math.PI * 2;
+      seeds[i] = Math.random() * Math.PI * 2;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 21, 0), 400);
 
-    const mat = new THREE.PointsMaterial({
-      color: 0x67d8ff, size: 0.5, transparent: true, opacity: 0.35,
-      depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
+    this.dustMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: /* glsl */`
+        attribute float aSeed;
+        uniform float uTime;
+        varying float vA;
+        void main() {
+          vec3 p = position;
+          float s = aSeed;
+          // Rise + wrap (matches the old CPU drift)
+          p.y = mod(p.y + uTime * (0.35 + 0.25 * sin(s)), 42.0);
+          p.x += sin(uTime * 0.2 + s) * 3.0;
+          p.z += cos(uTime * 0.17 + s) * 3.0;
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          gl_PointSize = 6.0 * (300.0 / max(1.0, -mv.z));
+          vA = 0.28 + 0.14 * sin(uTime * 1.3 + s * 3.0);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */`
+        varying float vA;
+        void main() {
+          vec2 q = gl_PointCoord - 0.5;
+          float d = length(q) * 2.0;
+          float a = smoothstep(1.0, 0.15, d) * vA;
+          gl_FragColor = vec4(vec3(0.40, 0.85, 1.0), a);
+        }`,
     });
-    this.dust = new THREE.Points(geo, mat);
+    this.dust = new THREE.Points(geo, this.dustMat);
+    this.dust.frustumCulled = false;
     this.scene.add(this.dust);
   }
 
@@ -557,16 +688,17 @@ export class Arena {
     this.dirLight = new THREE.DirectionalLight(0xbfd8ff, 2.2);
     this.dirLight.position.set(140, 260, -180);
     this.dirLight.castShadow = true;
-    // Round 7: 1024 default (the adaptive governor owns further scaling)
     this.dirLight.shadow.mapSize.width = 1024;
     this.dirLight.shadow.mapSize.height = 1024;
     this.userShadowSize = 1024;
     this.dirLight.shadow.camera.near = 20;
     this.dirLight.shadow.camera.far = 900;
-    this.dirLight.shadow.camera.left = -180;
-    this.dirLight.shadow.camera.right = 180;
-    this.dirLight.shadow.camera.top = 180;
-    this.dirLight.shadow.camera.bottom = -180;
+    // Tighter ortho frustum around the combat zone => sharper shadows at the
+    // same 1024 map size (texel density up ~45% vs the old ±180m box).
+    this.dirLight.shadow.camera.left = -150;
+    this.dirLight.shadow.camera.right = 150;
+    this.dirLight.shadow.camera.top = 150;
+    this.dirLight.shadow.camera.bottom = -150;
     this.dirLight.shadow.bias = -0.0004;
     this.scene.add(this.dirLight);
 
@@ -599,7 +731,8 @@ export class Arena {
   }
 
   /**
-   * Per-frame environment animation.
+   * Per-frame environment animation. The reworked arena only touches
+   * uniforms and a handful of opacity values - zero buffer uploads.
    */
   update(dt, camera = null) {
     this.clockT += dt;
@@ -629,21 +762,15 @@ export class Arena {
     this.coreRing2.rotation.z = -t * 0.6;
     this.centerLight.intensity = 1.5 + Math.sin(t * 2.2) * 0.5;
 
-    // Pylon beacons & beams
-    for (const b of this.pylonBeacons) {
-      const p = 0.85 + Math.sin(t * 2.4 + b.phase) * 0.35;
-      b.mesh.scale.setScalar(p);
-    }
-    for (const bm of this.pylonBeams) {
-      bm.mat.opacity = 0.05 + 0.03 * (0.5 + 0.5 * Math.sin(t * 1.7 + bm.phase));
-    }
+    // Pylon beacons: pulse lives in the shader now (uniform-only update)
+    this.beaconMat.uniforms.uTime.value = t;
+    // Volumetric beams: gentle synchronized breathing
+    this.beamMat.opacity = 0.05 + 0.03 * (0.5 + 0.5 * Math.sin(t * 1.7));
 
-    // Metric ring breathing
-    for (const r of this.rings) {
-      r.mat.opacity = r.baseOpacity * (0.75 + 0.25 * Math.sin(t * 1.3 + r.phase));
-    }
+    // Metric ring breathing (single mesh, single opacity)
+    this.ringMat.opacity = 0.4 * (0.75 + 0.25 * Math.sin(t * 1.3));
 
-    // Drifting ground fog
+    // Drifting ground fog (10 sprites - trivial)
     for (const f of this.fogSprites) {
       f.a += f.speed * dt;
       f.sp.position.x = Math.cos(f.a) * f.r;
@@ -655,15 +782,7 @@ export class Arena {
     this.skyFlash = Math.max(0, this.skyFlash - dt * 6.0);
     this.skyMat.uniforms.uFlash.value = Math.min(1.5, this.skyFlash);
 
-    // Drifting dust
-    const arr = this.dust.geometry.attributes.position.array;
-    for (let i = 0; i < this.dustSeeds.length; i++) {
-      const s = this.dustSeeds[i];
-      arr[i * 3 + 1] += dt * (0.35 + 0.25 * Math.sin(s));
-      arr[i * 3 + 0] += Math.sin(t * 0.2 + s) * dt * 0.6;
-      arr[i * 3 + 2] += Math.cos(t * 0.17 + s) * dt * 0.6;
-      if (arr[i * 3 + 1] > 42) arr[i * 3 + 1] = 0.5;
-    }
-    this.dust.geometry.attributes.position.needsUpdate = true;
+    // Atmosphere dust: GPU-animated (uniform-only)
+    this.dustMat.uniforms.uTime.value = t;
   }
 }
